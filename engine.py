@@ -355,14 +355,72 @@ def audit_and_tune(results_4d: List[str], saved_prediction: Dict = None) -> Dict
             "Mistik": get_mistik_scores(history_before)
         }
 
+        # SMART BOBOT (ANTI-OSILASI): Streak-Aware, Symmetric Multiplier & EMA Smoothing
+        method_streaks = {"Momentum": 0, "Markov": 0, "Delta": 0, "Mistik": 0}
+        for m_name in methods.keys():
+            m_streak = 0
+            for i in range(len(results_4d) - 2, max(0, len(results_4d) - 8), -1):
+                h_sub = [(int(r[2]), int(r[3])) for r in results_4d[:i + 1] if len(r) == 4 and r.isdigit()]
+                next_k = int(results_4d[i + 1][2])
+                next_e = int(results_4d[i + 1][3])
+                if m_name == "Momentum":
+                    s_map = get_momentum_scores(h_sub)
+                elif m_name == "Markov":
+                    s_map = get_markov_scores(h_sub)
+                elif m_name == "Delta":
+                    s_map = get_delta_scores(h_sub)
+                else:
+                    s_map = get_mistik_scores(h_sub)
+
+                t3 = sorted(s_map.keys(), key=lambda d: s_map[d], reverse=True)[:3]
+                was_hit = (next_k in t3 or next_e in t3)
+                if i == len(results_4d) - 2:
+                    m_streak = 1 if was_hit else -1
+                else:
+                    if m_streak > 0 and was_hit:
+                        m_streak += 1
+                    elif m_streak < 0 and not was_hit:
+                        m_streak -= 1
+                    else:
+                        break
+            method_streaks[m_name] = m_streak
+
         for m_name, scores in methods.items():
             top3 = sorted(scores.keys(), key=lambda d: scores[d], reverse=True)[:3]
-            if actual_k in top3 or actual_e in top3:
+            hit_method = (actual_k in top3 or actual_e in top3)
+            prev_w = float(calibrated_weights.get(m_name, 10.0))
+
+            prev_streak = method_streaks.get(m_name, 0)
+            current_streak_len = (prev_streak + 1) if (hit_method and prev_streak > 0) else (
+                (abs(prev_streak) + 1) if (not hit_method and prev_streak < 0) else 1
+            )
+
+            # 1. Streak-Aware Learning Rate (η):
+            # Streak 1 (fluktuasi harian / noise): η = 0.08 (±8%)
+            # Streak 2 (mulai konsisten): η = 0.16 (±16%)
+            # Streak >= 3 (tren kuat): η = 0.25 (±25%)
+            eta = 0.08
+            if current_streak_len >= 3:
+                eta = 0.25
+            elif current_streak_len == 2:
+                eta = 0.16
+
+            # 2. Symmetric Multiplier (e^+η vs e^-η):
+            multiplier = math.exp(eta) if hit_method else math.exp(-eta)
+            target_weight = prev_w * multiplier
+
+            # 3. EMA Smoothing (Filter Inersia 70:30):
+            beta = 0.70
+            smoothed_weight = beta * prev_w + (1.0 - beta) * target_weight
+
+            # 4. Safety Bounds Clamping [4.0x - 16.0x]:
+            clamped = max(4.0, min(16.0, smoothed_weight))
+            calibrated_weights[m_name] = round(clamped, 1)
+
+            if hit_method:
                 rewarded.append(m_name)
-                calibrated_weights[m_name] = round(calibrated_weights[m_name] * 1.35, 2)
             else:
                 penalized.append(m_name)
-                calibrated_weights[m_name] = round(max(0.4, calibrated_weights[m_name] * 0.65), 2)
 
     # 2. AUDIT PER-TIER BBFS (BBFS-6, 7, 8, 9): WIN -> FREEZE, LOSE -> CALIBRATED
     bbfs_tier_audits = {}
