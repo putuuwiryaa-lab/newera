@@ -104,7 +104,7 @@ def get_mistik_scores(history_2d: List[Tuple[int, int]], eval_window: int = 15) 
     return scores
 
 
-def rank_digits(history_2d: List[Tuple[int, int]], rolling_window: int = 20) -> Tuple[List[int], Dict[str, float]]:
+def rank_digits(history_2d: List[Tuple[int, int]], rolling_window: int = 20, tier_size: int = 4) -> Tuple[List[int], Dict[str, float]]:
     methods = {
         "Momentum": lambda h: get_momentum_scores(h),
         "Markov": lambda h: get_markov_scores(h),
@@ -122,8 +122,8 @@ def rank_digits(history_2d: List[Tuple[int, int]], rolling_window: int = 20) -> 
                 hist_until = history_2d[:-(rolling_window - step)]
                 actual_next = set(eval_slice[step + 1])
                 m_scores = m_func(hist_until)
-                top3 = sorted(m_scores.keys(), key=lambda d: m_scores[d], reverse=True)[:3]
-                if any(d in actual_next for d in top3):
+                top_candidates = sorted(m_scores.keys(), key=lambda d: m_scores[d], reverse=True)[:tier_size]
+                if any(d in actual_next for d in top_candidates):
                     hit_count += 1
             weights[m_name] = max(0.5, float(hit_count + 1))
 
@@ -242,24 +242,31 @@ def audit_and_tune(results_4d: List[str], saved_prediction: Dict = None) -> Dict
         for r in results_4d[:-1]
         if len(r) == 4 and r.isdigit()
     ]
-    ranked_t_minus_1, weights_t_minus_1 = rank_digits(history_before)
+    ranked_3, _ = rank_digits(history_before, tier_size=3)
+    ranked_4, weights_t_minus_1 = rank_digits(history_before, tier_size=4)
+    ranked_5, _ = rank_digits(history_before, tier_size=5)
+    ranked_6, _ = rank_digits(history_before, tier_size=6)
+    ranked_map = {3: ranked_3, 4: ranked_4, 5: ranked_5, 6: ranked_6}
     bbfs_t_minus_1, dead_digits_t_minus_1, _ = compute_dedicated_bbfs(history_before)
 
     if saved_prediction and "ai4" in saved_prediction and "bbfs7" in saved_prediction:
         predicted_ai4 = saved_prediction["ai4"]
         predicted_bbfs7 = saved_prediction["bbfs7"]
     else:
-        predicted_ai4 = ranked_t_minus_1[:4]
+        predicted_ai4 = ranked_4[:4]
         predicted_bbfs7 = bbfs_t_minus_1[7]
 
     # 1. AUDIT PER-TIER AI (AI-3, 4, 5, 6): WIN -> FREEZE, LOSE -> CALIBRATED
     ai_tier_audits = {}
     for sz in [3, 4, 5, 6]:
-        tier_digits = ranked_t_minus_1[:sz]
+        tier_digits = ranked_map[sz][:sz]
         is_hit = (actual_k in tier_digits or actual_e in tier_digits)
+        p_label = "3 Digit Ketat" if sz == 3 else ("4 Digit Utama" if sz == 4 else ("5 Digit Moderat" if sz == 5 else "6 Digit Proteksi"))
         ai_tier_audits[f"ai{sz}"] = {
+            "parameter": f"Parameter AI-{sz} ({p_label})",
             "status": "HIT" if is_hit else "LOSE",
             "action": "FREEZE" if is_hit else "CALIBRATED",
+            "tuning_directive": f"🔒 FREEZE: Parameter AI-{sz} dipertahankan stabil" if is_hit else f"⚡ KALIBRASI: Parameter AI-{sz} dikalibrasi ulang (Zonk)",
             "digits": tier_digits
         }
 
@@ -270,26 +277,29 @@ def audit_and_tune(results_4d: List[str], saved_prediction: Dict = None) -> Dict
         hit_digits.append(actual_e)
     status_ai = "HIT" if hit_digits else "LOSE"
 
-    # Penyesuaian Penalti & Reward 4 Metode AI
+    # Penyesuaian Penalti & Reward 4 Metode AI (Hanya jika ada tier yang Zonk)
     penalized = []
     rewarded = []
     calibrated_weights = dict(weights_t_minus_1)
 
-    methods = {
-        "Momentum": get_momentum_scores(history_before),
-        "Markov": get_markov_scores(history_before),
-        "Delta": get_delta_scores(history_before),
-        "Mistik": get_mistik_scores(history_before)
-    }
+    all_ai_frozen = all(audit["action"] == "FREEZE" for audit in ai_tier_audits.values())
 
-    for m_name, scores in methods.items():
-        top3 = sorted(scores.keys(), key=lambda d: scores[d], reverse=True)[:3]
-        if actual_k in top3 or actual_e in top3:
-            rewarded.append(m_name)
-            calibrated_weights[m_name] = round(calibrated_weights[m_name] * 1.35, 2)
-        else:
-            penalized.append(m_name)
-            calibrated_weights[m_name] = round(max(0.4, calibrated_weights[m_name] * 0.65), 2)
+    if not all_ai_frozen:
+        methods = {
+            "Momentum": get_momentum_scores(history_before),
+            "Markov": get_markov_scores(history_before),
+            "Delta": get_delta_scores(history_before),
+            "Mistik": get_mistik_scores(history_before)
+        }
+
+        for m_name, scores in methods.items():
+            top3 = sorted(scores.keys(), key=lambda d: scores[d], reverse=True)[:3]
+            if actual_k in top3 or actual_e in top3:
+                rewarded.append(m_name)
+                calibrated_weights[m_name] = round(calibrated_weights[m_name] * 1.35, 2)
+            else:
+                penalized.append(m_name)
+                calibrated_weights[m_name] = round(max(0.4, calibrated_weights[m_name] * 0.65), 2)
 
     # 2. AUDIT PER-TIER BBFS (BBFS-6, 7, 8, 9): WIN -> FREEZE, LOSE -> CALIBRATED
     bbfs_tier_audits = {}
@@ -299,9 +309,12 @@ def audit_and_tune(results_4d: List[str], saved_prediction: Dict = None) -> Dict
             is_hit = (actual_k in tier_digits)
         else:
             is_hit = (actual_k in tier_digits and actual_e in tier_digits)
+        bbfs_param_label = f"{sz} Digit / {30 if sz == 6 else (42 if sz == 7 else (56 if sz == 8 else 72))} Line"
         bbfs_tier_audits[f"bbfs{sz}"] = {
+            "parameter": f"Parameter BBFS-{sz} ({bbfs_param_label})",
             "status": "HIT" if is_hit else "LOSE",
             "action": "FREEZE" if is_hit else "CALIBRATED",
+            "tuning_directive": f"🔒 FREEZE: Parameter BBFS-{sz} dipertahankan stabil" if is_hit else f"⚡ KALIBRASI: Parameter BBFS-{sz} dikalibrasi ulang (Zonk)",
             "digits": tier_digits
         }
 
@@ -326,13 +339,19 @@ def audit_and_tune(results_4d: List[str], saved_prediction: Dict = None) -> Dict
         trimmer_zone = "MISSED"
 
     # Prediksi untuk putaran BERIKUTNYA (setelah result T masuk)
+    # Prediksi untuk putaran BERIKUTNYA (setelah result T masuk) - Dihitung independen per-tier
     full_history_2d = [
         (int(r[2]), int(r[3]))
         for r in results_4d
         if len(r) == 4 and r.isdigit()
     ]
-    next_ranked, next_weights = rank_digits(full_history_2d)
+    next_3, next_weights_3 = rank_digits(full_history_2d, tier_size=3)
+    next_4, next_weights_4 = rank_digits(full_history_2d, tier_size=4)
+    next_5, next_weights_5 = rank_digits(full_history_2d, tier_size=5)
+    next_6, next_weights_6 = rank_digits(full_history_2d, tier_size=6)
     next_bbfs, next_dead_digits, _ = compute_dedicated_bbfs(full_history_2d)
+
+    all_bbfs_frozen = all(audit["action"] == "FREEZE" for audit in bbfs_tier_audits.values())
 
     return {
         "actual_result": last_full,
@@ -354,7 +373,7 @@ def audit_and_tune(results_4d: List[str], saved_prediction: Dict = None) -> Dict
             "penalized_methods": penalized,
             "calibrated_weights": calibrated_weights,
             "recommended_tier": "AI-3" if ai_tier_audits.get("ai3", {}).get("action") == "FREEZE" else "AI-4",
-            "action_summary": "AI-3 dikalibrasi; AI-4..6 di-freeze" if ai_tier_audits.get("ai3", {}).get("action") == "CALIBRATED" else "Semua tier AI stabil (Freeze)"
+            "action_summary": "Semua tier AI stabil (Freeze Total)" if all_ai_frozen else ("AI-3 dikalibrasi; AI-4..6 di-freeze" if ai_tier_audits.get("ai3", {}).get("action") == "CALIBRATED" else "Audit AI Selesai")
         },
         "bbfs_tuning": {
             "tier_audits": bbfs_tier_audits,
@@ -364,19 +383,25 @@ def audit_and_tune(results_4d: List[str], saved_prediction: Dict = None) -> Dict
             "trimmer_zone": trimmer_zone,
             "is_twin": is_twin,
             "twin_status": "TWIN_PROTECTED" if (is_twin and actual_k in bbfs7_set) else ("TWIN_UNPROTECTED" if is_twin else "NON_TWIN"),
-            "rewarded_factor": "Top 10 BOM Hit" if trimmer_zone == "BOM_10" else ("Dead Digits 100% Bersih" if dead_digits_clean else "Densitas Pasangan"),
-            "penalized_factor": "Kebocoran Dead Digit" if not dead_digits_clean else ("Dispersi Pasangan" if status_bbfs == "LOSE" else "None"),
+            "rewarded_factor": "Semua Tier Tembus (Freeze Total)" if all_bbfs_frozen else ("Top 10 BOM Hit" if trimmer_zone == "BOM_10" else ("Dead Digits 100% Bersih" if dead_digits_clean else "Densitas Pasangan")),
+            "penalized_factor": "None (Freeze Total)" if all_bbfs_frozen else ("Kebocoran Dead Digit" if not dead_digits_clean else ("Dispersi Pasangan" if status_bbfs == "LOSE" else "None")),
             "recommended_tier": "BBFS-6" if bbfs_tier_audits.get("bbfs6", {}).get("action") == "FREEZE" else "BBFS-7",
-            "action_summary": "BBFS-6 dikalibrasi; BBFS-7..9 di-freeze" if bbfs_tier_audits.get("bbfs6", {}).get("action") == "CALIBRATED" else "Semua tier BBFS stabil (Freeze)"
+            "action_summary": "Semua tier BBFS stabil (Freeze Total)" if all_bbfs_frozen else ("BBFS-6 dikalibrasi; BBFS-7..9 di-freeze" if bbfs_tier_audits.get("bbfs6", {}).get("action") == "CALIBRATED" else "Audit BBFS Selesai")
         },
         "penalized_methods": penalized,
         "rewarded_methods": rewarded,
         "calibrated_weights": calibrated_weights,
         "next_prediction": {
-            "ai3": next_ranked[:3],
-            "ai4": next_ranked[:4],
-            "ai5": next_ranked[:5],
-            "ai6": next_ranked[:6],
+            "ai3": next_3[:3],
+            "ai4": next_4[:4],
+            "ai5": next_5[:5],
+            "ai6": next_6[:6],
+            "tier_method_weights": {
+                3: next_weights_3,
+                4: next_weights_4,
+                5: next_weights_5,
+                6: next_weights_6
+            },
             "bbfs6": next_bbfs[6],
             "bbfs7": next_bbfs[7],
             "bbfs8": next_bbfs[8],
