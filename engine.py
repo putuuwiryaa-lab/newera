@@ -104,7 +104,7 @@ def get_mistik_scores(history_2d: List[Tuple[int, int]], eval_window: int = 15) 
     return scores
 
 
-def rank_digits(history_2d: List[Tuple[int, int]], rolling_window: int = 20, tier_size: int = 4) -> Tuple[List[int], Dict[str, float]]:
+def rank_digits(history_2d: List[Tuple[int, int]], rolling_window: int = 20, tier_size: int = 4, custom_weights: Dict[str, float] = None) -> Tuple[List[int], Dict[str, float]]:
     methods = {
         "Momentum": lambda h: get_momentum_scores(h),
         "Markov": lambda h: get_markov_scores(h),
@@ -112,20 +112,26 @@ def rank_digits(history_2d: List[Tuple[int, int]], rolling_window: int = 20, tie
         "Mistik": lambda h: get_mistik_scores(h)
     }
 
-    weights = {"Momentum": 1.0, "Markov": 1.0, "Delta": 1.0, "Mistik": 1.0}
+    if custom_weights and len(custom_weights) > 0:
+        # ATURAN ENGINE: Jika prediksi masuk (FREEZE) atau sudah dikalibrasi,
+        # TIDAK PERLU hitung bobot dari awal! Langsung pertahankan bobot pemenang.
+        weights = {k: float(v) for k, v in custom_weights.items()}
+    else:
+        # HANYA 1x dihitung saat inisialisasi awal (cold-start / pertama kali)
+        weights = {"Momentum": 1.0, "Markov": 1.0, "Delta": 1.0, "Mistik": 1.0}
 
-    if len(history_2d) > rolling_window + 5:
-        eval_slice = history_2d[-rolling_window:]
-        for m_name, m_func in methods.items():
-            hit_count = 0
-            for step in range(len(eval_slice) - 1):
-                hist_until = history_2d[:-(rolling_window - step)]
-                actual_next = set(eval_slice[step + 1])
-                m_scores = m_func(hist_until)
-                top_candidates = sorted(m_scores.keys(), key=lambda d: m_scores[d], reverse=True)[:tier_size]
-                if any(d in actual_next for d in top_candidates):
-                    hit_count += 1
-            weights[m_name] = max(0.5, float(hit_count + 1))
+        if len(history_2d) > rolling_window + 5:
+            eval_slice = history_2d[-rolling_window:]
+            for m_name, m_func in methods.items():
+                hit_count = 0
+                for step in range(len(eval_slice) - 1):
+                    hist_until = history_2d[:-(rolling_window - step)]
+                    actual_next = set(eval_slice[step + 1])
+                    m_scores = m_func(hist_until)
+                    top_candidates = sorted(m_scores.keys(), key=lambda d: m_scores[d], reverse=True)[:tier_size]
+                    if any(d in actual_next for d in top_candidates):
+                        hit_count += 1
+                weights[m_name] = max(0.5, float(hit_count + 1))
 
     combined = {d: 0.0 for d in range(10)}
     for m_name, m_func in methods.items():
@@ -176,12 +182,15 @@ def compute_bbfs_tier_factor_weights(history_2d: List[Tuple[int, int]], eval_win
     return tier_weights
 
 
-def compute_dedicated_bbfs(history_2d: List[Tuple[int, int]], lookback: int = 50):
+def compute_dedicated_bbfs(history_2d: List[Tuple[int, int]], lookback: int = 50, custom_tier_factor_weights: Dict = None):
     """
     ENGINE KHUSUS BBFS 2D BELAKANG:
     Menghitung optimasi joint-pair coverage dengan bobot 4 komponen yang independen per-tier (6, 7, 8, 9).
     """
-    tier_factor_weights = compute_bbfs_tier_factor_weights(history_2d)
+    base_weights = compute_bbfs_tier_factor_weights(history_2d)
+    tier_factor_weights = dict(base_weights)
+    if custom_tier_factor_weights:
+        tier_factor_weights.update(custom_tier_factor_weights)
 
     sub = history_2d[-lookback:]
     n = len(sub)
@@ -307,7 +316,9 @@ def audit_and_tune(results_4d: List[str], saved_prediction: Dict = None) -> Dict
     # 1. AUDIT PER-TIER AI (AI-3, 4, 5, 6): WIN -> FREEZE, LOSE -> CALIBRATED
     ai_tier_audits = {}
     for sz in [3, 4, 5, 6]:
-        tier_digits = ranked_map[sz][:sz]
+        tier_digits = saved_prediction.get(f"ai{sz}") if saved_prediction else None
+        if not tier_digits:
+            tier_digits = ranked_map[sz][:sz]
         is_hit = (actual_k in tier_digits or actual_e in tier_digits)
         p_label = "3 Digit Ketat" if sz == 3 else ("4 Digit Utama" if sz == 4 else ("5 Digit Moderat" if sz == 5 else "6 Digit Proteksi"))
         ai_tier_audits[f"ai{sz}"] = {
@@ -329,6 +340,10 @@ def audit_and_tune(results_4d: List[str], saved_prediction: Dict = None) -> Dict
     penalized = []
     rewarded = []
     calibrated_weights = dict(weights_t_minus_1)
+    if saved_prediction and "tier_method_weights" in saved_prediction:
+        old_w4 = saved_prediction["tier_method_weights"].get(4) or saved_prediction["tier_method_weights"].get("4")
+        if old_w4:
+            calibrated_weights = dict(old_w4)
 
     all_ai_frozen = all(audit["action"] == "FREEZE" for audit in ai_tier_audits.values())
 
@@ -352,7 +367,9 @@ def audit_and_tune(results_4d: List[str], saved_prediction: Dict = None) -> Dict
     # 2. AUDIT PER-TIER BBFS (BBFS-6, 7, 8, 9): WIN -> FREEZE, LOSE -> CALIBRATED
     bbfs_tier_audits = {}
     for sz in [6, 7, 8, 9]:
-        tier_digits = bbfs_t_minus_1[sz]
+        tier_digits = saved_prediction.get(f"bbfs{sz}") if saved_prediction else None
+        if not tier_digits:
+            tier_digits = bbfs_t_minus_1[sz]
         if is_twin:
             is_hit = (actual_k in tier_digits)
         else:
@@ -386,18 +403,55 @@ def audit_and_tune(results_4d: List[str], saved_prediction: Dict = None) -> Dict
     else:
         trimmer_zone = "MISSED"
 
-    # Prediksi untuk putaran BERIKUTNYA (setelah result T masuk)
     # Prediksi untuk putaran BERIKUTNYA (setelah result T masuk) - Dihitung independen per-tier
     full_history_2d = [
         (int(r[2]), int(r[3]))
         for r in results_4d
         if len(r) == 4 and r.isdigit()
     ]
-    next_3, next_weights_3 = rank_digits(full_history_2d, tier_size=3)
-    next_4, next_weights_4 = rank_digits(full_history_2d, tier_size=4)
-    next_5, next_weights_5 = rank_digits(full_history_2d, tier_size=5)
-    next_6, next_weights_6 = rank_digits(full_history_2d, tier_size=6)
-    next_bbfs, next_dead_digits, _, next_bbfs_weights = compute_dedicated_bbfs(full_history_2d)
+
+    # ATURAN ENGINE: Jika prediksi masuk (FREEZE), TIDAK PERLU hitung bobot dari awal!
+    # Pertahankan bobot pemenang langsung tanpa recalculate. Hanya hitung saat cold-start.
+    next_ranked = {}
+    next_weights = {}
+    for sz in [3, 4, 5, 6]:
+        audit_tier = ai_tier_audits.get(f"ai{sz}", {})
+        if audit_tier.get("action") == "FREEZE":
+            # PREDIKSI MASUK: Freeze bobot pemenang tanpa hitung ulang dari awal
+            frozen_w = None
+            if saved_prediction and "tier_method_weights" in saved_prediction:
+                frozen_w = saved_prediction["tier_method_weights"].get(sz) or saved_prediction["tier_method_weights"].get(str(sz))
+            if not frozen_w:
+                frozen_w = calibrated_weights
+            r_sz, w_sz = rank_digits(full_history_2d, tier_size=sz, custom_weights=frozen_w)
+        else:
+            # PREDIKSI ZONK: Gunakan bobot terkalibrasi hasil tuning
+            r_sz, w_sz = rank_digits(full_history_2d, tier_size=sz, custom_weights=calibrated_weights)
+        next_ranked[sz] = r_sz
+        next_weights[sz] = w_sz
+
+    next_3 = next_ranked[3]
+    next_weights_3 = next_weights[3]
+    next_4 = next_ranked[4]
+    next_weights_4 = next_weights[4]
+    next_5 = next_ranked[5]
+    next_weights_5 = next_weights[5]
+    next_6 = next_ranked[6]
+    next_weights_6 = next_weights[6]
+
+    # BBFS: Jika tier WIN -> FREEZE bobot faktor tier tersebut tanpa hitung ulang dari awal
+    bbfs_custom_weights = {}
+    for sz in [6, 7, 8, 9]:
+        b_audit = bbfs_tier_audits.get(f"bbfs{sz}", {})
+        if b_audit.get("action") == "FREEZE" and saved_prediction and "bbfs_tier_weights" in saved_prediction:
+            old_bw = saved_prediction["bbfs_tier_weights"].get(sz) or saved_prediction["bbfs_tier_weights"].get(str(sz))
+            if old_bw:
+                bbfs_custom_weights[sz] = old_bw
+
+    next_bbfs, next_dead_digits, _, next_bbfs_weights = compute_dedicated_bbfs(
+        full_history_2d,
+        custom_tier_factor_weights=bbfs_custom_weights if bbfs_custom_weights else None
+    )
 
     all_bbfs_frozen = all(audit["action"] == "FREEZE" for audit in bbfs_tier_audits.values())
 
