@@ -304,7 +304,7 @@ def audit_and_tune(results_4d: List[str], saved_prediction: Dict = None) -> Dict
     ranked_5, _ = rank_digits(history_before, tier_size=5)
     ranked_6, _ = rank_digits(history_before, tier_size=6)
     ranked_map = {3: ranked_3, 4: ranked_4, 5: ranked_5, 6: ranked_6}
-    bbfs_t_minus_1, dead_digits_t_minus_1, _, _ = compute_dedicated_bbfs(history_before)
+    bbfs_t_minus_1, dead_digits_t_minus_1, _, bbfs_weights_t_minus_1 = compute_dedicated_bbfs(history_before)
 
     if saved_prediction and "ai4" in saved_prediction and "bbfs7" in saved_prediction:
         predicted_ai4 = saved_prediction["ai4"]
@@ -501,8 +501,12 @@ def audit_and_tune(results_4d: List[str], saved_prediction: Dict = None) -> Dict
     bbfs_custom_weights = {}
     for sz in [6, 7, 8, 9]:
         b_audit = bbfs_tier_audits.get(f"bbfs{sz}", {})
-        if b_audit.get("action") == "FREEZE" and saved_prediction and "bbfs_tier_weights" in saved_prediction:
-            old_bw = saved_prediction["bbfs_tier_weights"].get(sz) or saved_prediction["bbfs_tier_weights"].get(str(sz))
+        if b_audit.get("action") == "FREEZE":
+            old_bw = None
+            if saved_prediction and "bbfs_tier_weights" in saved_prediction:
+                old_bw = saved_prediction["bbfs_tier_weights"].get(sz) or saved_prediction["bbfs_tier_weights"].get(str(sz))
+            if not old_bw and bbfs_weights_t_minus_1:
+                old_bw = bbfs_weights_t_minus_1.get(sz)
             if old_bw:
                 bbfs_custom_weights[sz] = old_bw
 

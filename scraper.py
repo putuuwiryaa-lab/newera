@@ -224,8 +224,28 @@ def main():
                             'ai_tuning': tuning_info.get('ai_tuning'),
                             'bbfs_tuning': tuning_info.get('bbfs_tuning')
                         }
+                    elif existing_data.get('next_prediction'):
+                        # Pertahankan prediksi dan audit yang sudah ada agar tidak terhapus saat tidak ada draw baru
+                        doc_payload['next_prediction'] = existing_data['next_prediction']
+                        if existing_data.get('last_audit'):
+                            doc_payload['last_audit'] = existing_data['last_audit']
+                    elif len(new_history) >= 15:
+                        # Cold-start fallback jika dokumen baru pertama kali dibuat
+                        initial_tune = engine.audit_and_tune(new_history, None)
+                        if initial_tune and initial_tune.get('next_prediction'):
+                            doc_payload['next_prediction'] = initial_tune['next_prediction']
+                            doc_payload['last_audit'] = {
+                                'status_ai': initial_tune.get('status_ai'),
+                                'status_bbfs': initial_tune.get('status_bbfs'),
+                                'actual_result': initial_tune.get('actual_result'),
+                                'actual_2d': initial_tune.get('actual_2d'),
+                                'is_twin': initial_tune.get('is_twin'),
+                                'previous_prediction': initial_tune.get('previous_prediction'),
+                                'ai_tuning': initial_tune.get('ai_tuning'),
+                                'bbfs_tuning': initial_tune.get('bbfs_tuning')
+                            }
 
-                    db.collection('markets').document(market_id).set(doc_payload)
+                    db.collection('markets').document(market_id).set(doc_payload, merge=True)
                     print(f"OK (Saved to Firebase): {market_id}")
                 except Exception as err:
                     print(f"ERR (Firebase save failed for {market_id}): {err}")
