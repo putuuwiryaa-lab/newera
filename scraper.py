@@ -191,8 +191,8 @@ def main():
 
                     tuning_info = {}
                     if is_new_draw and len(new_history) >= 15:
-                        # Jalankan Auto-Tuning Cerdas & Audit
-                        tuning_info = engine.audit_and_tune(new_history)
+                        # Jalankan Auto-Tuning Cerdas & Audit membandingkan prediksi kemarin
+                        tuning_info = engine.audit_and_tune(new_history, existing_data.get('next_prediction'))
                         if tuning_info:
                             log_payload = {
                                 'market_id': market_id,

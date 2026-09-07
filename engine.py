@@ -207,9 +207,11 @@ def compute_dedicated_bbfs(history_2d: List[Tuple[int, int]], lookback: int = 50
     return res, dead_digits, bbfs_ranked
 
 
-def audit_and_tune(results_4d: List[str]) -> Dict:
+def audit_and_tune(results_4d: List[str], saved_prediction: Dict = None) -> Dict:
     """
     Menjalankan audit tebakan kemarin dan kalibrasi cerdas.
+    Jika saved_prediction tersedia dari Firebase, verifikasi tebakan yang tersimpan kemarin.
+    Jika belum ada, rekonstruksi tebakan T-1 secara deterministik.
     """
     if len(results_4d) < 15:
         return {}
@@ -229,8 +231,12 @@ def audit_and_tune(results_4d: List[str]) -> Dict:
     ranked_t_minus_1, weights_t_minus_1 = rank_digits(history_before)
     bbfs_t_minus_1, _, _ = compute_dedicated_bbfs(history_before)
 
-    predicted_ai4 = ranked_t_minus_1[:4]
-    predicted_bbfs7 = bbfs_t_minus_1[7]
+    if saved_prediction and "ai4" in saved_prediction and "bbfs7" in saved_prediction:
+        predicted_ai4 = saved_prediction["ai4"]
+        predicted_bbfs7 = saved_prediction["bbfs7"]
+    else:
+        predicted_ai4 = ranked_t_minus_1[:4]
+        predicted_bbfs7 = bbfs_t_minus_1[7]
 
     hit_digits = []
     if actual_k in predicted_ai4:
