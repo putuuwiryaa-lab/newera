@@ -155,7 +155,7 @@ def compute_dedicated_bbfs(history_2d: List[Tuple[int, int]], lookback: int = 50
             7: list(range(7)),
             8: list(range(8)),
             9: list(range(9))
-        }
+        }, [8, 9], list(range(10))
 
     k_scores = defaultdict(float)
     e_scores = defaultdict(float)
@@ -199,7 +199,12 @@ def compute_dedicated_bbfs(history_2d: List[Tuple[int, int]], lookback: int = 50
         digit_contrib = {d: sum(joint[d][x] + joint[x][d] for x in s) for d in s}
         res[size] = sorted(best_comb, key=lambda d: digit_contrib[d], reverse=True)
 
-    return res
+    # Hitung Skor Afinitas Total 2D per Digit (0-9)
+    bbfs_digit_scores = {d: sum(joint[d][x] + joint[x][d] for x in range(10)) for d in range(10)}
+    bbfs_ranked = sorted(bbfs_digit_scores.keys(), key=lambda d: bbfs_digit_scores[d], reverse=True)
+    dead_digits = bbfs_ranked[-2:]
+
+    return res, dead_digits, bbfs_ranked
 
 
 def audit_and_tune(results_4d: List[str]) -> Dict:
@@ -222,7 +227,7 @@ def audit_and_tune(results_4d: List[str]) -> Dict:
         if len(r) == 4 and r.isdigit()
     ]
     ranked_t_minus_1, weights_t_minus_1 = rank_digits(history_before)
-    bbfs_t_minus_1 = compute_dedicated_bbfs(history_before)
+    bbfs_t_minus_1, _, _ = compute_dedicated_bbfs(history_before)
 
     predicted_ai4 = ranked_t_minus_1[:4]
     predicted_bbfs7 = bbfs_t_minus_1[7]
@@ -264,7 +269,7 @@ def audit_and_tune(results_4d: List[str]) -> Dict:
         if len(r) == 4 and r.isdigit()
     ]
     next_ranked, next_weights = rank_digits(full_history_2d)
-    next_bbfs = compute_dedicated_bbfs(full_history_2d)
+    next_bbfs, next_dead_digits, _ = compute_dedicated_bbfs(full_history_2d)
 
     return {
         "actual_result": last_full,
@@ -288,6 +293,7 @@ def audit_and_tune(results_4d: List[str]) -> Dict:
             "bbfs6": next_bbfs[6],
             "bbfs7": next_bbfs[7],
             "bbfs8": next_bbfs[8],
-            "bbfs9": next_bbfs[9]
+            "bbfs9": next_bbfs[9],
+            "dead_digits": next_dead_digits
         }
     }
