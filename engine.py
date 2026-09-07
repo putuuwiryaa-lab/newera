@@ -4,6 +4,7 @@ Menjalankan audit tebakan, penalti/reward, dan prediksi periode berikutnya.
 """
 
 import math
+import itertools
 from collections import defaultdict
 from typing import List, Dict, Tuple
 
@@ -138,6 +139,69 @@ def rank_digits(history_2d: List[Tuple[int, int]], rolling_window: int = 20) -> 
     return ranked, weights
 
 
+def compute_dedicated_bbfs(history_2d: List[Tuple[int, int]], lookback: int = 50) -> Dict[int, List[int]]:
+    """
+    ENGINE KHUSUS BBFS 2D BELAKANG:
+    Menghitung optimasi joint-pair coverage (independen dari rumus 1 digit AI).
+    1. Memisahkan model posisi Kepala dan posisi Ekor (Markov & Recency)
+    2. Matriks afinitas pasangan 2D (co-occurrence & bolak-balik)
+    3. Evaluasi kombinatorika untuk memilih K digit yang memaksimalkan total pasangan ter-cover
+    """
+    sub = history_2d[-lookback:]
+    n = len(sub)
+    if n < 2:
+        return {
+            6: list(range(6)),
+            7: list(range(7)),
+            8: list(range(8)),
+            9: list(range(9))
+        }
+
+    k_scores = defaultdict(float)
+    e_scores = defaultdict(float)
+    pair_matrix = [[0.0 for _ in range(10)] for _ in range(10)]
+    last_k, last_e = sub[-1]
+    k_trans = defaultdict(float)
+    e_trans = defaultdict(float)
+
+    for i in range(n - 1):
+        pk, pe = sub[i]
+        nk, ne = sub[i + 1]
+        if pk == last_k:
+            k_trans[nk] += 1.0
+        if pe == last_e:
+            e_trans[ne] += 1.0
+
+    for idx, (k, e) in enumerate(sub):
+        decay = math.exp(0.05 * (idx - n + 1))
+        k_scores[k] += decay
+        e_scores[e] += decay
+        pair_matrix[k][e] += 2.0 * decay
+        pair_matrix[e][k] += 1.2 * decay
+
+    joint = [[0.0 for _ in range(10)] for _ in range(10)]
+    for k in range(10):
+        for e in range(10):
+            pos_pot = (k_scores[k] + k_trans[k] * 1.5) * (e_scores[e] + e_trans[e] * 1.5)
+            joint[k][e] = pos_pot + (pair_matrix[k][e] * 3.0)
+
+    res = {}
+    for size in [6, 7, 8, 9]:
+        best_score = -1.0
+        best_comb = None
+        for comb in itertools.combinations(range(10), size):
+            s = set(comb)
+            score = sum(joint[k][e] for k in s for e in s)
+            if score > best_score:
+                best_score = score
+                best_comb = comb
+        s = set(best_comb)
+        digit_contrib = {d: sum(joint[d][x] + joint[x][d] for x in s) for d in s}
+        res[size] = sorted(best_comb, key=lambda d: digit_contrib[d], reverse=True)
+
+    return res
+
+
 def audit_and_tune(results_4d: List[str]) -> Dict:
     """
     Menjalankan audit tebakan kemarin dan kalibrasi cerdas.
@@ -158,9 +222,10 @@ def audit_and_tune(results_4d: List[str]) -> Dict:
         if len(r) == 4 and r.isdigit()
     ]
     ranked_t_minus_1, weights_t_minus_1 = rank_digits(history_before)
+    bbfs_t_minus_1 = compute_dedicated_bbfs(history_before)
 
     predicted_ai4 = ranked_t_minus_1[:4]
-    predicted_bbfs7 = ranked_t_minus_1[:7]
+    predicted_bbfs7 = bbfs_t_minus_1[7]
 
     hit_digits = []
     if actual_k in predicted_ai4:
@@ -199,6 +264,7 @@ def audit_and_tune(results_4d: List[str]) -> Dict:
         if len(r) == 4 and r.isdigit()
     ]
     next_ranked, next_weights = rank_digits(full_history_2d)
+    next_bbfs = compute_dedicated_bbfs(full_history_2d)
 
     return {
         "actual_result": last_full,
@@ -219,9 +285,9 @@ def audit_and_tune(results_4d: List[str]) -> Dict:
             "ai4": next_ranked[:4],
             "ai5": next_ranked[:5],
             "ai6": next_ranked[:6],
-            "bbfs6": next_ranked[:6],
-            "bbfs7": next_ranked[:7],
-            "bbfs8": next_ranked[:8],
-            "bbfs9": next_ranked[:9]
+            "bbfs6": next_bbfs[6],
+            "bbfs7": next_bbfs[7],
+            "bbfs8": next_bbfs[8],
+            "bbfs9": next_bbfs[9]
         }
     }
