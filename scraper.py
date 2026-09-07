@@ -209,7 +209,7 @@ def main():
                             }
                             # Simpan snapshot tuning permanen ke koleksi 'tuning_logs'
                             db.collection('tuning_logs').add(log_payload)
-                            print(f"🎯 [SMART TUNE] {market_id}: {tuning_info['status_ai']} (Result: {tuning_info['actual_result']})")
+                            print(f"🎯 [SMART TUNE] {market_id}: AI={tuning_info.get('status_ai')} | BBFS={tuning_info.get('status_bbfs')} (Result: {tuning_info.get('actual_result')})")
 
                     # 2. Simpan / update ke collection 'markets'
                     if tuning_info.get('next_prediction'):
@@ -217,7 +217,12 @@ def main():
                         doc_payload['last_audit'] = {
                             'status_ai': tuning_info.get('status_ai'),
                             'status_bbfs': tuning_info.get('status_bbfs'),
-                            'actual_result': tuning_info.get('actual_result')
+                            'actual_result': tuning_info.get('actual_result'),
+                            'actual_2d': tuning_info.get('actual_2d'),
+                            'is_twin': tuning_info.get('is_twin'),
+                            'previous_prediction': tuning_info.get('previous_prediction'),
+                            'ai_tuning': tuning_info.get('ai_tuning'),
+                            'bbfs_tuning': tuning_info.get('bbfs_tuning')
                         }
 
                     db.collection('markets').document(market_id).set(doc_payload)

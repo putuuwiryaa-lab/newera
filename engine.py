@@ -207,11 +207,25 @@ def compute_dedicated_bbfs(history_2d: List[Tuple[int, int]], lookback: int = 50
     return res, dead_digits, bbfs_ranked
 
 
+def generate_smart_trim(bbfs7_digits: List[int]) -> Dict[str, List[str]]:
+    """Memilah kombinasi 2D BBFS-7 ke dalam Top 10 BOM, Medium 15, dan Cadangan."""
+    top4 = bbfs7_digits[:4]
+    top10 = [f"{a}{b}" for a in top4 for b in top4 if a != b][:10]
+    top5 = bbfs7_digits[:5]
+    all_top5 = [f"{a}{b}" for a in top5 for b in top5 if a != b]
+    medium15 = [l for l in all_top5 if l not in top10][:15]
+    top7 = bbfs7_digits[:7]
+    all_top7 = [f"{a}{b}" for a in top7 for b in top7 if a != b]
+    used = set(top10 + medium15)
+    cadangan = [l for l in all_top7 if l not in used]
+    return {"top10": top10, "medium15": medium15, "cadangan": cadangan}
+
+
 def audit_and_tune(results_4d: List[str], saved_prediction: Dict = None) -> Dict:
     """
     Menjalankan audit tebakan kemarin dan kalibrasi cerdas.
-    Jika saved_prediction tersedia dari Firebase, verifikasi tebakan yang tersimpan kemarin.
-    Jika belum ada, rekonstruksi tebakan T-1 secara deterministik.
+    Memisahkan secara total audit AI (4 metode adaptif) dan BBFS (densitas pasangan & dead digits)
+    dengan aturan per-tier: ZONK -> Dikalibrasi, WIN -> Freeze.
     """
     if len(results_4d) < 15:
         return {}
@@ -229,7 +243,7 @@ def audit_and_tune(results_4d: List[str], saved_prediction: Dict = None) -> Dict
         if len(r) == 4 and r.isdigit()
     ]
     ranked_t_minus_1, weights_t_minus_1 = rank_digits(history_before)
-    bbfs_t_minus_1, _, _ = compute_dedicated_bbfs(history_before)
+    bbfs_t_minus_1, dead_digits_t_minus_1, _ = compute_dedicated_bbfs(history_before)
 
     if saved_prediction and "ai4" in saved_prediction and "bbfs7" in saved_prediction:
         predicted_ai4 = saved_prediction["ai4"]
@@ -238,16 +252,25 @@ def audit_and_tune(results_4d: List[str], saved_prediction: Dict = None) -> Dict
         predicted_ai4 = ranked_t_minus_1[:4]
         predicted_bbfs7 = bbfs_t_minus_1[7]
 
+    # 1. AUDIT PER-TIER AI (AI-3, 4, 5, 6): WIN -> FREEZE, LOSE -> CALIBRATED
+    ai_tier_audits = {}
+    for sz in [3, 4, 5, 6]:
+        tier_digits = ranked_t_minus_1[:sz]
+        is_hit = (actual_k in tier_digits or actual_e in tier_digits)
+        ai_tier_audits[f"ai{sz}"] = {
+            "status": "HIT" if is_hit else "LOSE",
+            "action": "FREEZE" if is_hit else "CALIBRATED",
+            "digits": tier_digits
+        }
+
     hit_digits = []
     if actual_k in predicted_ai4:
         hit_digits.append(actual_k)
     if actual_e in predicted_ai4 and actual_e not in hit_digits:
         hit_digits.append(actual_e)
-
     status_ai = "HIT" if hit_digits else "LOSE"
-    status_bbfs = "HIT" if (actual_k in predicted_bbfs7 and actual_e in predicted_bbfs7) else "LOSE"
 
-    # Penyesuaian Penalti & Reward
+    # Penyesuaian Penalti & Reward 4 Metode AI
     penalized = []
     rewarded = []
     calibrated_weights = dict(weights_t_minus_1)
@@ -268,6 +291,40 @@ def audit_and_tune(results_4d: List[str], saved_prediction: Dict = None) -> Dict
             penalized.append(m_name)
             calibrated_weights[m_name] = round(max(0.4, calibrated_weights[m_name] * 0.65), 2)
 
+    # 2. AUDIT PER-TIER BBFS (BBFS-6, 7, 8, 9): WIN -> FREEZE, LOSE -> CALIBRATED
+    bbfs_tier_audits = {}
+    for sz in [6, 7, 8, 9]:
+        tier_digits = bbfs_t_minus_1[sz]
+        if is_twin:
+            is_hit = (actual_k in tier_digits)
+        else:
+            is_hit = (actual_k in tier_digits and actual_e in tier_digits)
+        bbfs_tier_audits[f"bbfs{sz}"] = {
+            "status": "HIT" if is_hit else "LOSE",
+            "action": "FREEZE" if is_hit else "CALIBRATED",
+            "digits": tier_digits
+        }
+
+    bbfs7_set = set(predicted_bbfs7)
+    status_bbfs = "HIT" if (actual_k in bbfs7_set if is_twin else (actual_k in bbfs7_set and actual_e in bbfs7_set)) else "LOSE"
+
+    # Dead Digits Audit
+    dead_digits_clean = (actual_k not in dead_digits_t_minus_1 and actual_e not in dead_digits_t_minus_1)
+
+    # Smart Trimmer Zone Audit
+    trimmer = generate_smart_trim(predicted_bbfs7)
+    target_2d = f"{actual_k}{actual_e}"
+    if target_2d in trimmer["top10"]:
+        trimmer_zone = "BOM_10"
+    elif target_2d in trimmer["medium15"]:
+        trimmer_zone = "MEDIUM_15"
+    elif target_2d in trimmer["cadangan"]:
+        trimmer_zone = "CADANGAN"
+    elif is_twin and actual_k in predicted_bbfs7:
+        trimmer_zone = "CADANGAN"
+    else:
+        trimmer_zone = "MISSED"
+
     # Prediksi untuk putaran BERIKUTNYA (setelah result T masuk)
     full_history_2d = [
         (int(r[2]), int(r[3]))
@@ -283,11 +340,35 @@ def audit_and_tune(results_4d: List[str], saved_prediction: Dict = None) -> Dict
         "is_twin": is_twin,
         "previous_prediction": {
             "ai4": predicted_ai4,
-            "bbfs7": predicted_bbfs7
+            "bbfs7": predicted_bbfs7,
+            "dead_digits": dead_digits_t_minus_1
         },
         "status_ai": status_ai,
         "status_bbfs": status_bbfs,
         "hit_digits": hit_digits,
+        "ai_tuning": {
+            "tier_audits": ai_tier_audits,
+            "status_ai4": status_ai,
+            "hit_digits": hit_digits,
+            "rewarded_methods": rewarded,
+            "penalized_methods": penalized,
+            "calibrated_weights": calibrated_weights,
+            "recommended_tier": "AI-3" if ai_tier_audits.get("ai3", {}).get("action") == "FREEZE" else "AI-4",
+            "action_summary": "AI-3 dikalibrasi; AI-4..6 di-freeze" if ai_tier_audits.get("ai3", {}).get("action") == "CALIBRATED" else "Semua tier AI stabil (Freeze)"
+        },
+        "bbfs_tuning": {
+            "tier_audits": bbfs_tier_audits,
+            "status_bbfs7": status_bbfs,
+            "dead_digits": dead_digits_t_minus_1,
+            "dead_digits_clean": dead_digits_clean,
+            "trimmer_zone": trimmer_zone,
+            "is_twin": is_twin,
+            "twin_status": "TWIN_PROTECTED" if (is_twin and actual_k in bbfs7_set) else ("TWIN_UNPROTECTED" if is_twin else "NON_TWIN"),
+            "rewarded_factor": "Top 10 BOM Hit" if trimmer_zone == "BOM_10" else ("Dead Digits 100% Bersih" if dead_digits_clean else "Densitas Pasangan"),
+            "penalized_factor": "Kebocoran Dead Digit" if not dead_digits_clean else ("Dispersi Pasangan" if status_bbfs == "LOSE" else "None"),
+            "recommended_tier": "BBFS-6" if bbfs_tier_audits.get("bbfs6", {}).get("action") == "FREEZE" else "BBFS-7",
+            "action_summary": "BBFS-6 dikalibrasi; BBFS-7..9 di-freeze" if bbfs_tier_audits.get("bbfs6", {}).get("action") == "CALIBRATED" else "Semua tier BBFS stabil (Freeze)"
+        },
         "penalized_methods": penalized,
         "rewarded_methods": rewarded,
         "calibrated_weights": calibrated_weights,
