@@ -8,6 +8,7 @@ import base64
 import urllib3
 import firebase_admin
 from firebase_admin import credentials, firestore
+import engine
 
 # Nonaktifkan warning SSL karena server paito menggunakan sertifikat self-signed/khusus
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -177,7 +178,42 @@ def main():
 
             if db is not None:
                 try:
-                    # Simpan / update ke collection 'markets'
+                    # 1. Cek diffing: Apakah ada result baru yang belum tercatat?
+                    existing_doc = db.collection('markets').document(market_id).get()
+                    existing_data = existing_doc.to_dict() if existing_doc.exists else {}
+                    existing_history = existing_data.get('history_data', '').split()
+                    new_history = data.split()
+
+                    is_new_draw = (
+                        len(new_history) > 0 and
+                        (len(existing_history) == 0 or new_history[-1] != existing_history[-1])
+                    )
+
+                    tuning_info = {}
+                    if is_new_draw and len(new_history) >= 15:
+                        # Jalankan Auto-Tuning Cerdas & Audit
+                        tuning_info = engine.audit_and_tune(new_history)
+                        if tuning_info:
+                            log_payload = {
+                                'market_id': market_id,
+                                'market_name': market_id,
+                                'date': time.strftime('%Y-%m-%d', time.gmtime()),
+                                'timestamp': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
+                                **tuning_info
+                            }
+                            # Simpan snapshot tuning permanen ke koleksi 'tuning_logs'
+                            db.collection('tuning_logs').add(log_payload)
+                            print(f"🎯 [SMART TUNE] {market_id}: {tuning_info['status_ai']} (Result: {tuning_info['actual_result']})")
+
+                    # 2. Simpan / update ke collection 'markets'
+                    if tuning_info.get('next_prediction'):
+                        doc_payload['next_prediction'] = tuning_info['next_prediction']
+                        doc_payload['last_audit'] = {
+                            'status_ai': tuning_info.get('status_ai'),
+                            'status_bbfs': tuning_info.get('status_bbfs'),
+                            'actual_result': tuning_info.get('actual_result')
+                        }
+
                     db.collection('markets').document(market_id).set(doc_payload)
                     print(f"OK (Saved to Firebase): {market_id}")
                 except Exception as err:
