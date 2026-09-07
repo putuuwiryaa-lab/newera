@@ -3,89 +3,126 @@ import re
 import time
 import random
 import os
-from supabase import create_client
+import json
+import base64
+import urllib3
+import firebase_admin
+from firebase_admin import credentials, firestore
 
-SUPABASE_URL = os.environ["SUPABASE_URL"]
-SUPABASE_KEY = os.environ.get("SUPABASE_ANON_KEY") or os.environ["SUPABASE_SERVICE_ROLE_KEY"]
-supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+# Nonaktifkan warning SSL karena server paito menggunakan sertifikat self-signed/khusus
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 BASE = "https://159.65.133.131"
 
 MARKETS = {
-  "MAGNUM CAMBODIA": "/data-pengeluaran-togel-magnum-cambodia/",
-  "BULLSEYE": "/data-pengeluaran-togel-bullseye/",
-  "SYDNEY LOTTO": "/data-pengeluaran-togel-sdlotto/",
-  "SYDNEY POOLS": "/data-pengeluaran-togel-sydney-pools/",
-  "CHINA POOLS": "/data-pengeluaran-togel-chinapools/",
-  "JAPAN": "/data-pengeluaran-togel-japan/",
-  "SINGAPORE": "/data-pengeluaran-togel-singapore/",
-  "TAIWAN": "/data-pengeluaran-togel-taiwan/",
-  "HONGKONG POOLS": "/data-pengeluaran-togel-hongkong-pools/",
-  "HONGKONG LOTTO": "/data-pengeluaran-togel-hklotto/",
-  "MARYLAND MIDDAY": "/data-pengeluaran-togel-maryland-midday/",
-  "GEORGIA MIDDAY": "/data-pengeluaran-togel-georgia-midday/",
-  "MOROCCO 23:59": "/data-pengeluaran-togel-morocco-quatro-23-59-wib/",
-  "MICHIGAN MIDDAY": "/data-pengeluaran-togel-michigan-midday/",
-  "NEW JERSEY MIDDAY": "/data-pengeluaran-togel-new-jersey-midday/",
-  "GERMANY PLUS5": "/data-pengeluaran-togel-germany-plus5/",
-  "INDIANA MIDDAY": "/data-pengeluaran-togel-indiana-midday/",
-  "TENNESSE MIDDAY": "/data-pengeluaran-togel-tennesse-midday/",
-  "KENTUCKY MID": "/data-pengeluaran-togel-kentucky-midday/",
-  "TEXAS DAY": "/data-pengeluaran-togel-texas-day/",
-  "FLORIDA MID": "/data-pengeluaran-togel-florida-midday/",
-  "ILLINOIS MIDDAY": "/data-pengeluaran-togel-illinois-midday/",
-  "MISSOURI MIDDAY": "/data-pengeluaran-togel-missouri-midday/",
-  "WASHINGTON DC MIDDAY": "/data-pengeluaran-togel-washington-dc-midday/",
-  "CONNECTICUT DAY": "/data-pengeluaran-togel-connecticut-day/",
-  "VIRGINIA DAY": "/data-pengeluaran-togel-virginia-day/",
-  "NEW YORK MID": "/data-pengeluaran-togel-new-york-midday/",
-  "MOROCCO 03:00": "/data-pengeluaran-togel-morocco-quatro-03-00-wib/",
-  "CAROLINA DAY": "/data-pengeluaran-togel-north-carolina-day/",
-  "OREGON 4": "/data-pengeluaran-togel-oregon-04-00-wib/",
-  "WEST VIRGINIA": "/data-pengeluaran-togel-west-virginia/",
-  "GEORGIA EVE": "/data-pengeluaran-togel-georgia-evening/",
-  "OREGON 7": "/data-pengeluaran-togel-oregon-07-00-wib/",
-  "TEXAS EVE": "/data-pengeluaran-togel-texas-evening/",
-  "TENNESSE EVE": "/data-pengeluaran-togel-tennesse-evening/",
-  "MICHIGAN EVE": "/data-pengeluaran-togel-michigan-evening/",
-  "MARYLAND EVE": "/data-pengeluaran-togel-maryland-evening/",
-  "WASHINGTON DC EVE": "/data-pengeluaran-togel-washington-dc-evening/",
-  "CALIFORNIA": "/data-pengeluaran-togel-california/",
-  "FLORIDA EVE": "/data-pengeluaran-togel-florida-evening/",
-  "MISSOURI EVE": "/data-pengeluaran-togel-missouri-evening/",
-  "OREGON 10": "/data-pengeluaran-togel-oregon-10-00-wib/",
-  "WISCONSIN EVE": "/data-pengeluaran-togel-wisconsin-evening/",
-  "ILLINOIS EVE": "/data-pengeluaran-togel-illinois-evening/",
-  "CONNECTICUT NIGHT": "/data-pengeluaran-togel-connecticut-night/",
-  "NEW YORK EVE": "/data-pengeluaran-togel-new-york-evening/",
-  "INDIANA EVE": "/data-pengeluaran-togel-indiana-evening/",
-  "NEW JERSEY EVE": "/data-pengeluaran-togel-new-jersey-evening/",
-  "KENTUCKY EVE": "/data-pengeluaran-togel-kentucky-evening/",
-  "VIRGINIA NIGHT": "/data-pengeluaran-togel-virginia-night/",
-  "TEXAS NIGHT": "/data-pengeluaran-togel-texas-night/",
-  "CAROLINA EVE": "/data-pengeluaran-togel-north-carolina-evening/",
-  "GEORGIA NIGHT": "/data-pengeluaran-togel-georgia-night/",
-  "OREGON 13": "/data-pengeluaran-togel-oregon-13-00-wib/",
-  "MOROCCO 18:00": "/data-pengeluaran-togel-morocco-quatro-18-00-wib/",
-  "PCSO": "/data-pengeluaran-togel-pcso/",
-  "MOROCCO 21:00": "/data-pengeluaran-togel-morocco-quatro-21-00-wib/",
-  "TEXAS MORNING": "/data-pengeluaran-togel-texas-morning/",
+    "MAGNUM CAMBODIA": "/data-pengeluaran-togel-magnum-cambodia/",
+    "BULLSEYE": "/data-pengeluaran-togel-bullseye/",
+    "SYDNEY LOTTO": "/data-pengeluaran-togel-sdlotto/",
+    "SYDNEY POOLS": "/data-pengeluaran-togel-sydney-pools/",
+    "CHINA POOLS": "/data-pengeluaran-togel-chinapools/",
+    "JAPAN": "/data-pengeluaran-togel-japan/",
+    "SINGAPORE": "/data-pengeluaran-togel-singapore/",
+    "TAIWAN": "/data-pengeluaran-togel-taiwan/",
+    "HONGKONG POOLS": "/data-pengeluaran-togel-hongkong-pools/",
+    "HONGKONG LOTTO": "/data-pengeluaran-togel-hklotto/",
+    "MARYLAND MIDDAY": "/data-pengeluaran-togel-maryland-midday/",
+    "GEORGIA MIDDAY": "/data-pengeluaran-togel-georgia-midday/",
+    "MOROCCO 23:59": "/data-pengeluaran-togel-morocco-quatro-23-59-wib/",
+    "MICHIGAN MIDDAY": "/data-pengeluaran-togel-michigan-midday/",
+    "NEW JERSEY MIDDAY": "/data-pengeluaran-togel-new-jersey-midday/",
+    "GERMANY PLUS5": "/data-pengeluaran-togel-germany-plus5/",
+    "INDIANA MIDDAY": "/data-pengeluaran-togel-indiana-midday/",
+    "TENNESSE MIDDAY": "/data-pengeluaran-togel-tennesse-midday/",
+    "KENTUCKY MID": "/data-pengeluaran-togel-kentucky-midday/",
+    "TEXAS DAY": "/data-pengeluaran-togel-texas-day/",
+    "FLORIDA MID": "/data-pengeluaran-togel-florida-midday/",
+    "ILLINOIS MIDDAY": "/data-pengeluaran-togel-illinois-midday/",
+    "MISSOURI MIDDAY": "/data-pengeluaran-togel-missouri-midday/",
+    "WASHINGTON DC MIDDAY": "/data-pengeluaran-togel-washington-dc-midday/",
+    "CONNECTICUT DAY": "/data-pengeluaran-togel-connecticut-day/",
+    "VIRGINIA DAY": "/data-pengeluaran-togel-virginia-day/",
+    "NEW YORK MID": "/data-pengeluaran-togel-new-york-midday/",
+    "MOROCCO 03:00": "/data-pengeluaran-togel-morocco-quatro-03-00-wib/",
+    "CAROLINA DAY": "/data-pengeluaran-togel-north-carolina-day/",
+    "OREGON 4": "/data-pengeluaran-togel-oregon-04-00-wib/",
+    "WEST VIRGINIA": "/data-pengeluaran-togel-west-virginia/",
+    "GEORGIA EVE": "/data-pengeluaran-togel-georgia-evening/",
+    "OREGON 7": "/data-pengeluaran-togel-oregon-07-00-wib/",
+    "TEXAS EVE": "/data-pengeluaran-togel-texas-evening/",
+    "TENNESSE EVE": "/data-pengeluaran-togel-tennesse-evening/",
+    "MICHIGAN EVE": "/data-pengeluaran-togel-michigan-evening/",
+    "MARYLAND EVE": "/data-pengeluaran-togel-maryland-evening/",
+    "WASHINGTON DC EVE": "/data-pengeluaran-togel-washington-dc-evening/",
+    "CALIFORNIA": "/data-pengeluaran-togel-california/",
+    "FLORIDA EVE": "/data-pengeluaran-togel-florida-evening/",
+    "MISSOURI EVE": "/data-pengeluaran-togel-missouri-evening/",
+    "OREGON 10": "/data-pengeluaran-togel-oregon-10-00-wib/",
+    "WISCONSIN EVE": "/data-pengeluaran-togel-wisconsin-evening/",
+    "ILLINOIS EVE": "/data-pengeluaran-togel-illinois-evening/",
+    "CONNECTICUT NIGHT": "/data-pengeluaran-togel-connecticut-night/",
+    "NEW YORK EVE": "/data-pengeluaran-togel-new-york-evening/",
+    "INDIANA EVE": "/data-pengeluaran-togel-indiana-evening/",
+    "NEW JERSEY EVE": "/data-pengeluaran-togel-new-jersey-evening/",
+    "KENTUCKY EVE": "/data-pengeluaran-togel-kentucky-evening/",
+    "VIRGINIA NIGHT": "/data-pengeluaran-togel-virginia-night/",
+    "TEXAS NIGHT": "/data-pengeluaran-togel-texas-night/",
+    "CAROLINA EVE": "/data-pengeluaran-togel-north-carolina-evening/",
+    "GEORGIA NIGHT": "/data-pengeluaran-togel-georgia-night/",
+    "OREGON 13": "/data-pengeluaran-togel-oregon-13-00-wib/",
+    "MOROCCO 18:00": "/data-pengeluaran-togel-morocco-quatro-18-00-wib/",
+    "PCSO": "/data-pengeluaran-togel-pcso/",
+    "MOROCCO 21:00": "/data-pengeluaran-togel-morocco-quatro-21-00-wib/",
+    "TEXAS MORNING": "/data-pengeluaran-togel-texas-morning/",
 }
 
 PRIORITY_ORDER = {
-  "MAGNUM CAMBODIA": 1,
-  "SYDNEY POOLS": 2,
-  "SYDNEY LOTTO": 3,
-  "CHINA POOLS": 4,
-  "JAPAN": 5,
-  "SINGAPORE": 6,
-  "PCSO": 7,
-  "TAIWAN": 8,
-  "HONGKONG POOLS": 9,
-  "HONGKONG LOTTO": 10,
+    "MAGNUM CAMBODIA": 1,
+    "SYDNEY POOLS": 2,
+    "SYDNEY LOTTO": 3,
+    "CHINA POOLS": 4,
+    "JAPAN": 5,
+    "SINGAPORE": 6,
+    "PCSO": 7,
+    "TAIWAN": 8,
+    "HONGKONG POOLS": 9,
+    "HONGKONG LOTTO": 10,
 }
 
+def init_firebase():
+    """Inisialisasi koneksi Firebase Firestore dari Secrets atau File lokal."""
+    # 1. Cek dari environment variable (GitHub Secrets atau env local)
+    sa_env = os.environ.get("FIREBASE_SERVICE_ACCOUNT")
+    if sa_env:
+        try:
+            # Coba parse sebagai raw JSON
+            cred_dict = json.loads(sa_env)
+            cred = credentials.Certificate(cred_dict)
+            firebase_admin.initialize_app(cred)
+            return firestore.client()
+        except Exception:
+            # Coba decode jika base64
+            try:
+                decoded = base64.b64decode(sa_env).decode("utf-8")
+                cred_dict = json.loads(decoded)
+                cred = credentials.Certificate(cred_dict)
+                firebase_admin.initialize_app(cred)
+                return firestore.client()
+            except Exception as e:
+                print(f"Gagal memuat kredensial dari FIREBASE_SERVICE_ACCOUNT: {e}")
+
+    # 2. Cek file lokal standar
+    local_keys = ["firebase-key.json", "serviceAccountKey.json"]
+    for key_file in local_keys:
+        if os.path.exists(key_file):
+            cred = credentials.Certificate(key_file)
+            firebase_admin.initialize_app(cred)
+            return firestore.client()
+
+    print("PERINGATAN: Kredensial Firebase tidak ditemukan. Berjalan dalam mode DRY-RUN (tidak menyimpan ke DB).")
+    return None
+
 def scrape_market(url):
+    """Scrape data pengeluaran dari URL paito."""
     try:
         res = requests.get(
             BASE + url,
@@ -108,15 +145,20 @@ def scrape_market(url):
         for i in range(0, len(digits) - 3, 4):
             results.append(digits[i] + digits[i+1] + digits[i+2] + digits[i+3])
 
-        return ' '.join(results[-170:])
+        # Ambil maksimal 500 result terakhir
+        return ' '.join(results[-500:])
     except Exception as e:
         print(f"Error scraping {url}: {e}")
         return ''
 
 def main():
+    db = init_firebase()
+    
     next_order = 11
     success = 0
     errors = 0
+
+    print(f"Memulai scraping {len(MARKETS)} pasaran...\n")
 
     for market_id, url in MARKETS.items():
         data = scrape_market(url)
@@ -125,21 +167,30 @@ def main():
             if market_id not in PRIORITY_ORDER:
                 next_order += 1
 
-            result = supabase.table('markets').upsert({
+            doc_payload = {
                 'id': market_id,
                 'name': market_id,
                 'history_data': data,
                 'order': current_order,
                 'updated_at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
-            }).execute()
+            }
 
-            print(f"OK: {market_id}")
+            if db is not None:
+                try:
+                    # Simpan / update ke collection 'markets'
+                    db.collection('markets').document(market_id).set(doc_payload)
+                    print(f"OK (Saved to Firebase): {market_id}")
+                except Exception as err:
+                    print(f"ERR (Firebase save failed for {market_id}): {err}")
+            else:
+                print(f"OK (Dry-run, scraped {len(data.split())} numbers): {market_id}")
+
             success += 1
         else:
-            print(f"SKIP: {market_id} (data kosong)")
+            print(f"SKIP: {market_id} (data kosong / gagal koneksi)")
             errors += 1
 
-        delay = random.uniform(2, 4)
+        delay = random.uniform(1.5, 3.0)
         time.sleep(delay)
 
     print(f"\nSelesai: {success} OK, {errors} skip/error")

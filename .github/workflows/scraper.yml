@@ -1,0 +1,33 @@
+name: Togel Market Data Scraper
+
+on:
+  schedule:
+    # Berjalan setiap 3 jam (menit ke-0)
+    - cron: '0 */3 * * *'
+  # Memungkinkan trigger manual langsung dari tab "Actions" di GitHub
+  workflow_dispatch:
+
+jobs:
+  scrape-and-sync:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run Scraper and Sync to Firebase
+        env:
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+        run: |
+          python scraper.py
