@@ -139,14 +139,50 @@ def rank_digits(history_2d: List[Tuple[int, int]], rolling_window: int = 20, tie
     return ranked, weights
 
 
-def compute_dedicated_bbfs(history_2d: List[Tuple[int, int]], lookback: int = 50) -> Dict[int, List[int]]:
+def compute_bbfs_tier_factor_weights(history_2d: List[Tuple[int, int]], eval_window: int = 15) -> Dict[int, Dict[str, float]]:
+    """Menghitung bobot empiris 4 faktor BBFS spesifik per-tier (6, 7, 8, 9)."""
+    sub = history_2d[-eval_window:]
+    base_priors = {
+        6: {'Densitas Pasangan': 10.0, 'Transisi Markov': 8.0, 'Momentum Posisi': 6.0, 'Coverage Proteksi': 4.0},
+        7: {'Densitas Pasangan': 8.0, 'Transisi Markov': 8.0, 'Momentum Posisi': 7.0, 'Coverage Proteksi': 7.0},
+        8: {'Densitas Pasangan': 7.0, 'Transisi Markov': 6.0, 'Momentum Posisi': 8.0, 'Coverage Proteksi': 9.0},
+        9: {'Densitas Pasangan': 5.0, 'Transisi Markov': 5.0, 'Momentum Posisi': 8.0, 'Coverage Proteksi': 12.0}
+    }
+    tier_weights = {sz: dict(base_priors[sz]) for sz in [6, 7, 8, 9]}
+    if len(sub) < 3:
+        return tier_weights
+
+    for i in range(len(sub) - 1):
+        prev_k, prev_e = sub[i]
+        act_k, act_e = sub[i + 1]
+
+        hist_so_far = sub[:i + 1]
+        had_direct_pair = any((k == act_k and e == act_e) or (k == act_e and e == act_k) for k, e in hist_so_far)
+        had_markov = any((sub[j][0] == prev_k and sub[j + 1][0] == act_k) or (sub[j][1] == prev_e and sub[j + 1][1] == act_e) for j in range(i))
+        recent5 = sub[max(0, i - 4):i + 1]
+        had_momentum = any(k in (act_k, act_e) or e in (act_k, act_e) for k, e in recent5)
+
+        for sz in [6, 7, 8, 9]:
+            if had_direct_pair:
+                tier_weights[sz]['Densitas Pasangan'] += 1.0 if sz == 6 else (0.8 if sz == 7 else 0.6)
+            if had_markov:
+                tier_weights[sz]['Transisi Markov'] += 0.9 if sz == 6 else (0.8 if sz == 7 else 0.5)
+            if had_momentum:
+                tier_weights[sz]['Momentum Posisi'] += 1.0 if sz >= 8 else 0.7
+            tier_weights[sz]['Coverage Proteksi'] += 1.2 if sz == 9 else (0.9 if sz == 8 else 0.4)
+
+    for sz in [6, 7, 8, 9]:
+        tier_weights[sz] = {k: round(v, 1) for k, v in tier_weights[sz].items()}
+    return tier_weights
+
+
+def compute_dedicated_bbfs(history_2d: List[Tuple[int, int]], lookback: int = 50):
     """
     ENGINE KHUSUS BBFS 2D BELAKANG:
-    Menghitung optimasi joint-pair coverage (independen dari rumus 1 digit AI).
-    1. Memisahkan model posisi Kepala dan posisi Ekor (Markov & Recency)
-    2. Matriks afinitas pasangan 2D (co-occurrence & bolak-balik)
-    3. Evaluasi kombinatorika untuk memilih K digit yang memaksimalkan total pasangan ter-cover
+    Menghitung optimasi joint-pair coverage dengan bobot 4 komponen yang independen per-tier (6, 7, 8, 9).
     """
+    tier_factor_weights = compute_bbfs_tier_factor_weights(history_2d)
+
     sub = history_2d[-lookback:]
     n = len(sub)
     if n < 2:
@@ -155,7 +191,7 @@ def compute_dedicated_bbfs(history_2d: List[Tuple[int, int]], lookback: int = 50
             7: list(range(7)),
             8: list(range(8)),
             9: list(range(9))
-        }, [8, 9], list(range(10))
+        }, [8, 9], list(range(10)), tier_factor_weights
 
     k_scores = defaultdict(float)
     e_scores = defaultdict(float)
@@ -179,32 +215,44 @@ def compute_dedicated_bbfs(history_2d: List[Tuple[int, int]], lookback: int = 50
         pair_matrix[k][e] += 2.0 * decay
         pair_matrix[e][k] += 1.2 * decay
 
-    joint = [[0.0 for _ in range(10)] for _ in range(10)]
-    for k in range(10):
-        for e in range(10):
-            pos_pot = (k_scores[k] + k_trans[k] * 1.5) * (e_scores[e] + e_trans[e] * 1.5)
-            joint[k][e] = pos_pot + (pair_matrix[k][e] * 3.0)
-
     res = {}
     for size in [6, 7, 8, 9]:
+        w = tier_factor_weights[size]
+        total_w = sum(w.values()) or 1.0
+        norm_w = {k: (v / total_w) * 4.0 for k, v in w.items()}
+
+        joint_size = [[0.0 for _ in range(10)] for _ in range(10)]
+        for k in range(10):
+            for e in range(10):
+                pos_pot = (k_scores[k] + k_trans[k] * 1.5) * (e_scores[e] + e_trans[e] * 1.5)
+                pair_pot = pair_matrix[k][e] * 3.0
+                cov_pot = (k_scores[k] + e_scores[e]) * 0.8
+                trans_pot = (k_trans[k] * e_trans[e] * 2.0)
+                joint_size[k][e] = (
+                    norm_w['Densitas Pasangan'] * pair_pot +
+                    norm_w['Transisi Markov'] * trans_pot +
+                    norm_w['Momentum Posisi'] * pos_pot +
+                    norm_w['Coverage Proteksi'] * cov_pot
+                )
+
         best_score = -1.0
         best_comb = None
         for comb in itertools.combinations(range(10), size):
             s = set(comb)
-            score = sum(joint[k][e] for k in s for e in s)
+            score = sum(joint_size[k][e] for k in s for e in s)
             if score > best_score:
                 best_score = score
                 best_comb = comb
         s = set(best_comb)
-        digit_contrib = {d: sum(joint[d][x] + joint[x][d] for x in s) for d in s}
+        digit_contrib = {d: sum(joint_size[d][x] + joint_size[x][d] for x in s) for d in s}
         res[size] = sorted(best_comb, key=lambda d: digit_contrib[d], reverse=True)
 
-    # Hitung Skor Afinitas Total 2D per Digit (0-9)
-    bbfs_digit_scores = {d: sum(joint[d][x] + joint[x][d] for x in range(10)) for d in range(10)}
+    base_joint = [[(k_scores[k] + k_trans[k] * 1.5) * (e_scores[e] + e_trans[e] * 1.5) + (pair_matrix[k][e] * 3.0) for e in range(10)] for k in range(10)]
+    bbfs_digit_scores = {d: sum(base_joint[d][x] + base_joint[x][d] for x in range(10)) for d in range(10)}
     bbfs_ranked = sorted(bbfs_digit_scores.keys(), key=lambda d: bbfs_digit_scores[d], reverse=True)
     dead_digits = bbfs_ranked[-2:]
 
-    return res, dead_digits, bbfs_ranked
+    return res, dead_digits, bbfs_ranked, tier_factor_weights
 
 
 def generate_smart_trim(bbfs7_digits: List[int]) -> Dict[str, List[str]]:
@@ -247,7 +295,7 @@ def audit_and_tune(results_4d: List[str], saved_prediction: Dict = None) -> Dict
     ranked_5, _ = rank_digits(history_before, tier_size=5)
     ranked_6, _ = rank_digits(history_before, tier_size=6)
     ranked_map = {3: ranked_3, 4: ranked_4, 5: ranked_5, 6: ranked_6}
-    bbfs_t_minus_1, dead_digits_t_minus_1, _ = compute_dedicated_bbfs(history_before)
+    bbfs_t_minus_1, dead_digits_t_minus_1, _, _ = compute_dedicated_bbfs(history_before)
 
     if saved_prediction and "ai4" in saved_prediction and "bbfs7" in saved_prediction:
         predicted_ai4 = saved_prediction["ai4"]
@@ -349,7 +397,7 @@ def audit_and_tune(results_4d: List[str], saved_prediction: Dict = None) -> Dict
     next_4, next_weights_4 = rank_digits(full_history_2d, tier_size=4)
     next_5, next_weights_5 = rank_digits(full_history_2d, tier_size=5)
     next_6, next_weights_6 = rank_digits(full_history_2d, tier_size=6)
-    next_bbfs, next_dead_digits, _ = compute_dedicated_bbfs(full_history_2d)
+    next_bbfs, next_dead_digits, _, next_bbfs_weights = compute_dedicated_bbfs(full_history_2d)
 
     all_bbfs_frozen = all(audit["action"] == "FREEZE" for audit in bbfs_tier_audits.values())
 
@@ -406,6 +454,7 @@ def audit_and_tune(results_4d: List[str], saved_prediction: Dict = None) -> Dict
             "bbfs7": next_bbfs[7],
             "bbfs8": next_bbfs[8],
             "bbfs9": next_bbfs[9],
+            "bbfs_tier_weights": next_bbfs_weights,
             "dead_digits": next_dead_digits
         }
     }
