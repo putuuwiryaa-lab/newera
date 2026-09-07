@@ -169,7 +169,7 @@ def audit_and_tune(results_4d: List[str]) -> Dict:
         hit_digits.append(actual_e)
 
     status_ai = "HIT" if hit_digits else "LOSE"
-    status_bbfs = "HIT" if (actual_k in predicted_bbfs7 and actual_e in predicted_bbfs7 and not is_twin) else "LOSE"
+    status_bbfs = "HIT" if (actual_k in predicted_bbfs7 and actual_e in predicted_bbfs7) else "LOSE"
 
     # Penyesuaian Penalti & Reward
     penalized = []
