@@ -2,8 +2,8 @@ name: Togel Market Data Scraper
 
 on:
   schedule:
-    # Berjalan setiap 3 jam (menit ke-0)
-    - cron: '0 */3 * * *'
+    # Berjalan setiap 12 jam (00:00 dan 12:00 UTC)
+    - cron: '0 */12 * * *'
   # Memungkinkan trigger manual langsung dari tab "Actions" di GitHub
   workflow_dispatch:
 
