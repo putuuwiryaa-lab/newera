@@ -95,6 +95,14 @@ PRIORITY_ORDER = {
     "Hongkong Lotto": 10,
 }
 
+def stringify_keys(obj):
+    """Memastikan seluruh key dalam dict adalah string murni (wajib untuk Firestore document paths)."""
+    if isinstance(obj, dict):
+        return {str(k): stringify_keys(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [stringify_keys(item) for item in obj]
+    return obj
+
 def init_firebase():
     """Inisialisasi koneksi Firebase Firestore dari Secrets atau File lokal."""
     # 1. Cek dari environment variable (GitHub Secrets atau env local)
@@ -208,7 +216,7 @@ def main():
                                 **tuning_info
                             }
                             # Simpan snapshot tuning permanen ke koleksi 'tuning_logs'
-                            db.collection('tuning_logs').add(log_payload)
+                            db.collection('tuning_logs').add(stringify_keys(log_payload))
                             print(f"🎯 [SMART TUNE] {market_id}: AI={tuning_info.get('status_ai')} | BBFS={tuning_info.get('status_bbfs')} (Result: {tuning_info.get('actual_result')})")
 
                     # 2. Simpan / update ke collection 'markets'
@@ -245,10 +253,13 @@ def main():
                                 'bbfs_tuning': initial_tune.get('bbfs_tuning')
                             }
 
-                    db.collection('markets').document(market_id).set(doc_payload, merge=True)
+                    clean_doc = stringify_keys(doc_payload)
+                    db.collection('markets').document(market_id).set(clean_doc, merge=True)
                     print(f"OK (Saved to Firebase): {market_id}")
                 except Exception as err:
+                    import traceback
                     print(f"ERR (Firebase save failed for {market_id}): {err}")
+                    traceback.print_exc()
             else:
                 print(f"OK (Dry-run, scraped {len(data.split())} numbers): {market_id}")
 

@@ -561,16 +561,16 @@ def audit_and_tune(results_4d: List[str], saved_prediction: Dict = None) -> Dict
             "ai5": next_5[:5],
             "ai6": next_6[:6],
             "tier_method_weights": {
-                3: next_weights_3,
-                4: next_weights_4,
-                5: next_weights_5,
-                6: next_weights_6
+                "3": next_weights_3,
+                "4": next_weights_4,
+                "5": next_weights_5,
+                "6": next_weights_6
             },
             "bbfs6": next_bbfs[6],
             "bbfs7": next_bbfs[7],
             "bbfs8": next_bbfs[8],
             "bbfs9": next_bbfs[9],
-            "bbfs_tier_weights": next_bbfs_weights,
+            "bbfs_tier_weights": {str(k): v for k, v in next_bbfs_weights.items()},
             "dead_digits": next_dead_digits
         }
     }
