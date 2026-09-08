@@ -1,4 +1,4 @@
-import requests
+﻿import requests
 import re
 import time
 import random
@@ -6,6 +6,7 @@ import os
 import json
 import base64
 import urllib3
+from bs4 import BeautifulSoup
 import firebase_admin
 from firebase_admin import credentials, firestore
 import engine
@@ -76,6 +77,12 @@ MARKETS = {
     "Michigan Midday": "/data-pengeluaran-togel-michigan-midday/",
 }
 
+SEJAHTERA_MARKETS = {
+    "Mongolia": "https://sejahteramarah.com/mobile/togel/pasaran-18",
+    "New Mexico Day": "https://sejahteramarah.com/mobile/togel/pasaran-78",
+    "New Mexico Eve": "https://sejahteramarah.com/mobile/togel/pasaran-79",
+}
+
 PRIORITY_ORDER = {
     "Magnum Cambodia": 1,
     "Sydneypools": 2,
@@ -87,6 +94,9 @@ PRIORITY_ORDER = {
     "Taiwan": 8,
     "Hongkong Pools": 9,
     "Hongkong Lotto": 10,
+    "Mongolia": 65,
+    "New Mexico Day": 66,
+    "New Mexico Eve": 67,
 }
 
 def stringify_keys(obj):
@@ -99,17 +109,14 @@ def stringify_keys(obj):
 
 def init_firebase():
     """Inisialisasi koneksi Firebase Firestore dari Secrets atau File lokal."""
-    # 1. Cek dari environment variable (GitHub Secrets atau env local)
     sa_env = os.environ.get("FIREBASE_SERVICE_ACCOUNT")
     if sa_env:
         try:
-            # Coba parse sebagai raw JSON
             cred_dict = json.loads(sa_env)
             cred = credentials.Certificate(cred_dict)
             firebase_admin.initialize_app(cred)
             return firestore.client()
         except Exception:
-            # Coba decode jika base64
             try:
                 decoded = base64.b64decode(sa_env).decode("utf-8")
                 cred_dict = json.loads(decoded)
@@ -119,7 +126,6 @@ def init_firebase():
             except Exception as e:
                 print(f"Gagal memuat kredensial dari FIREBASE_SERVICE_ACCOUNT: {e}")
 
-    # 2. Cek file lokal standar
     local_keys = ["firebase-key.json", "serviceAccountKey.json"]
     for key_file in local_keys:
         if os.path.exists(key_file):
@@ -131,7 +137,7 @@ def init_firebase():
     return None
 
 def scrape_market(url):
-    """Scrape data pengeluaran dari URL paito."""
+    """Scrape data pengeluaran dari server paito standar."""
     try:
         res = requests.get(
             BASE + url,
@@ -154,115 +160,209 @@ def scrape_market(url):
         for i in range(0, len(digits) - 3, 4):
             results.append(digits[i] + digits[i+1] + digits[i+2] + digits[i+3])
 
-        # Ambil maksimal 500 result terakhir
         return ' '.join(results[-500:])
     except Exception as e:
         print(f"Error scraping {url}: {e}")
         return ''
 
+def scrape_sejahtera_market(url, existing_history_str=""):
+    """Scrape pasaran dari Sejahtera (sejahteramarah.com) secara incremental atau full."""
+    days = "Senin|Selasa|Rabu|Kamis|Jumat|Sabtu|Minggu"
+    date_pat = r"\d{1,2}/\d{1,2}/\d{4}"
+    pattern = rf"(?:{days})\s+({date_pat})\s+(\d)\s+(\d)\s+(\d)\s+(\d)"
+    fallback = rf"({date_pat})\s+(\d)\s+(\d)\s+(\d)\s+(\d)"
+
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Linux; Android 10; Mobile) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/121.0.0.0 Mobile Safari/537.36"
+        ),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Referer": "https://sejahteramarah.com/",
+    }
+
+    # Jika sudah ada existing_history, scrape 3 halaman terdepan saja untuk update harian
+    pages_to_fetch = 3 if existing_history_str else 35
+    all_draws = []
+    seen_dates = set()
+
+    for page in range(1, pages_to_fetch + 1):
+        page_url = url if page <= 1 else f"{url}?page={page}"
+        try:
+            r = requests.get(page_url, headers=headers, timeout=20, verify=False)
+            if not r.ok:
+                break
+            soup = BeautifulSoup(r.text, "html.parser")
+            text = re.sub(r"\s+", " ", soup.get_text(" ", strip=True))
+
+            matches = re.findall(pattern, text, flags=re.IGNORECASE)
+            if not matches:
+                matches = re.findall(fallback, text, flags=re.IGNORECASE)
+            if not matches:
+                break
+
+            for date_str, d1, d2, d3, d4 in matches:
+                if date_str not in seen_dates:
+                    seen_dates.add(date_str)
+                    all_draws.append(d1 + d2 + d3 + d4)
+        except Exception as e:
+            print(f"Error scraping Sejahtera page {page}: {e}")
+            break
+
+    new_reversed = list(reversed(all_draws))
+    if not existing_history_str:
+        return " ".join(new_reversed[-500:])
+
+    existing = existing_history_str.strip().split()
+    if not existing:
+        return " ".join(new_reversed[-500:])
+
+    last_known = existing[-1]
+    if last_known in new_reversed:
+        last_idx = len(new_reversed) - 1 - new_reversed[::-1].index(last_known)
+        fresh_draws = new_reversed[last_idx + 1:]
+        if fresh_draws:
+            existing.extend(fresh_draws)
+    elif new_reversed:
+        for d in new_reversed:
+            if d != existing[-1]:
+                existing.append(d)
+
+    return " ".join(existing[-500:])
+
+def sync_market_data(db, market_id, data, current_order):
+    """Fungsi pembantu sinkronisasi, diffing, auto-tuning, dan penyimpanan ke Firestore."""
+    doc_payload = {
+        'id': market_id,
+        'name': market_id,
+        'history_data': data,
+        'order': current_order,
+        'updated_at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
+    }
+
+    if db is not None:
+        try:
+            existing_doc = db.collection('markets').document(market_id).get()
+            existing_data = existing_doc.to_dict() if existing_doc.exists else {}
+            existing_history = existing_data.get('history_data', '').split()
+            new_history = data.split()
+
+            is_new_draw = (
+                len(new_history) > 0 and
+                (len(existing_history) == 0 or new_history[-1] != existing_history[-1])
+            )
+
+            tuning_info = {}
+            if is_new_draw and len(new_history) >= 15:
+                tuning_info = engine.audit_and_tune(new_history, existing_data.get('next_prediction'))
+                if tuning_info:
+                    log_payload = {
+                        'market_id': market_id,
+                        'market_name': market_id,
+                        'date': time.strftime('%Y-%m-%d', time.gmtime()),
+                        'timestamp': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
+                        **tuning_info
+                    }
+                    db.collection('tuning_logs').add(stringify_keys(log_payload))
+                    print(f"🎯 [SMART TUNE] {market_id}: AI={tuning_info.get('status_ai')} | BBFS={tuning_info.get('status_bbfs')} (Result: {tuning_info.get('actual_result')})")
+
+            if tuning_info.get('next_prediction'):
+                doc_payload['next_prediction'] = tuning_info['next_prediction']
+                doc_payload['last_audit'] = {
+                    'status_ai': tuning_info.get('status_ai'),
+                    'status_bbfs': tuning_info.get('status_bbfs'),
+                    'actual_result': tuning_info.get('actual_result'),
+                    'actual_2d': tuning_info.get('actual_2d'),
+                    'is_twin': tuning_info.get('is_twin'),
+                    'previous_prediction': tuning_info.get('previous_prediction'),
+                    'ai_tuning': tuning_info.get('ai_tuning'),
+                    'bbfs_tuning': tuning_info.get('bbfs_tuning')
+                }
+            elif existing_data.get('next_prediction'):
+                doc_payload['next_prediction'] = existing_data['next_prediction']
+                if existing_data.get('last_audit'):
+                    doc_payload['last_audit'] = existing_data['last_audit']
+            elif len(new_history) >= 15:
+                initial_tune = engine.audit_and_tune(new_history, None)
+                if initial_tune and initial_tune.get('next_prediction'):
+                    doc_payload['next_prediction'] = initial_tune['next_prediction']
+                    doc_payload['last_audit'] = {
+                        'status_ai': initial_tune.get('status_ai'),
+                        'status_bbfs': initial_tune.get('status_bbfs'),
+                        'actual_result': initial_tune.get('actual_result'),
+                        'actual_2d': initial_tune.get('actual_2d'),
+                        'is_twin': initial_tune.get('is_twin'),
+                        'previous_prediction': initial_tune.get('previous_prediction'),
+                        'ai_tuning': initial_tune.get('ai_tuning'),
+                        'bbfs_tuning': initial_tune.get('bbfs_tuning')
+                    }
+
+            clean_doc = stringify_keys(doc_payload)
+            db.collection('markets').document(market_id).set(clean_doc, merge=True)
+            print(f"OK (Saved to Firebase): {market_id}")
+            return True
+        except Exception as err:
+            import traceback
+            print(f"ERR (Firebase save failed for {market_id}): {err}")
+            traceback.print_exc()
+            return False
+    else:
+        print(f"OK (Dry-run, scraped {len(data.split())} numbers): {market_id}")
+        return True
+
 def main():
     db = init_firebase()
-    
     next_order = 11
     success = 0
     errors = 0
 
-    print(f"Memulai scraping {len(MARKETS)} pasaran...\n")
+    total_all = len(MARKETS) + len(SEJAHTERA_MARKETS)
+    print(f"Memulai scraping {total_all} pasaran ({len(MARKETS)} standar + {len(SEJAHTERA_MARKETS)} Sejahtera)...\n")
 
+    # 1. Scrape Pasaran Server Standar
     for market_id, url in MARKETS.items():
         data = scrape_market(url)
         if data:
             current_order = PRIORITY_ORDER.get(market_id, next_order)
             if market_id not in PRIORITY_ORDER:
                 next_order += 1
-
-            doc_payload = {
-                'id': market_id,
-                'name': market_id,
-                'history_data': data,
-                'order': current_order,
-                'updated_at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
-            }
-
-            if db is not None:
-                try:
-                    # 1. Cek diffing: Apakah ada result baru yang belum tercatat?
-                    existing_doc = db.collection('markets').document(market_id).get()
-                    existing_data = existing_doc.to_dict() if existing_doc.exists else {}
-                    existing_history = existing_data.get('history_data', '').split()
-                    new_history = data.split()
-
-                    is_new_draw = (
-                        len(new_history) > 0 and
-                        (len(existing_history) == 0 or new_history[-1] != existing_history[-1])
-                    )
-
-                    tuning_info = {}
-                    if is_new_draw and len(new_history) >= 15:
-                        # Jalankan Auto-Tuning Cerdas & Audit membandingkan prediksi kemarin
-                        tuning_info = engine.audit_and_tune(new_history, existing_data.get('next_prediction'))
-                        if tuning_info:
-                            log_payload = {
-                                'market_id': market_id,
-                                'market_name': market_id,
-                                'date': time.strftime('%Y-%m-%d', time.gmtime()),
-                                'timestamp': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
-                                **tuning_info
-                            }
-                            # Simpan snapshot tuning permanen ke koleksi 'tuning_logs'
-                            db.collection('tuning_logs').add(stringify_keys(log_payload))
-                            print(f"🎯 [SMART TUNE] {market_id}: AI={tuning_info.get('status_ai')} | BBFS={tuning_info.get('status_bbfs')} (Result: {tuning_info.get('actual_result')})")
-
-                    # 2. Simpan / update ke collection 'markets'
-                    if tuning_info.get('next_prediction'):
-                        doc_payload['next_prediction'] = tuning_info['next_prediction']
-                        doc_payload['last_audit'] = {
-                            'status_ai': tuning_info.get('status_ai'),
-                            'status_bbfs': tuning_info.get('status_bbfs'),
-                            'actual_result': tuning_info.get('actual_result'),
-                            'actual_2d': tuning_info.get('actual_2d'),
-                            'is_twin': tuning_info.get('is_twin'),
-                            'previous_prediction': tuning_info.get('previous_prediction'),
-                            'ai_tuning': tuning_info.get('ai_tuning'),
-                            'bbfs_tuning': tuning_info.get('bbfs_tuning')
-                        }
-                    elif existing_data.get('next_prediction'):
-                        # Pertahankan prediksi dan audit yang sudah ada agar tidak terhapus saat tidak ada draw baru
-                        doc_payload['next_prediction'] = existing_data['next_prediction']
-                        if existing_data.get('last_audit'):
-                            doc_payload['last_audit'] = existing_data['last_audit']
-                    elif len(new_history) >= 15:
-                        # Cold-start fallback jika dokumen baru pertama kali dibuat
-                        initial_tune = engine.audit_and_tune(new_history, None)
-                        if initial_tune and initial_tune.get('next_prediction'):
-                            doc_payload['next_prediction'] = initial_tune['next_prediction']
-                            doc_payload['last_audit'] = {
-                                'status_ai': initial_tune.get('status_ai'),
-                                'status_bbfs': initial_tune.get('status_bbfs'),
-                                'actual_result': initial_tune.get('actual_result'),
-                                'actual_2d': initial_tune.get('actual_2d'),
-                                'is_twin': initial_tune.get('is_twin'),
-                                'previous_prediction': initial_tune.get('previous_prediction'),
-                                'ai_tuning': initial_tune.get('ai_tuning'),
-                                'bbfs_tuning': initial_tune.get('bbfs_tuning')
-                            }
-
-                    clean_doc = stringify_keys(doc_payload)
-                    db.collection('markets').document(market_id).set(clean_doc, merge=True)
-                    print(f"OK (Saved to Firebase): {market_id}")
-                except Exception as err:
-                    import traceback
-                    print(f"ERR (Firebase save failed for {market_id}): {err}")
-                    traceback.print_exc()
+            if sync_market_data(db, market_id, data, current_order):
+                success += 1
             else:
-                print(f"OK (Dry-run, scraped {len(data.split())} numbers): {market_id}")
-
-            success += 1
+                errors += 1
         else:
             print(f"SKIP: {market_id} (data kosong / gagal koneksi)")
             errors += 1
 
-        delay = random.uniform(1.5, 3.0)
+        delay = random.uniform(1.0, 2.5)
+        time.sleep(delay)
+
+    # 2. Scrape Pasaran Sejahtera (Mongolia, New Mexico Day, New Mexico Eve)
+    for market_id, url in SEJAHTERA_MARKETS.items():
+        existing_history = ""
+        if db is not None:
+            try:
+                ed = db.collection('markets').document(market_id).get()
+                if ed.exists:
+                    existing_history = ed.to_dict().get('history_data', '')
+            except Exception:
+                pass
+
+        data = scrape_sejahtera_market(url, existing_history)
+        if data:
+            current_order = PRIORITY_ORDER.get(market_id, next_order)
+            if market_id not in PRIORITY_ORDER:
+                next_order += 1
+            if sync_market_data(db, market_id, data, current_order):
+                success += 1
+            else:
+                errors += 1
+        else:
+            print(f"SKIP: {market_id} (data kosong Sejahtera)")
+            errors += 1
+
+        delay = random.uniform(1.0, 2.0)
         time.sleep(delay)
 
     print(f"\nSelesai: {success} OK, {errors} skip/error")
