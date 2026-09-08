@@ -1,4 +1,4 @@
-﻿import requests
+import requests
 import re
 import time
 import random
@@ -81,6 +81,7 @@ SEJAHTERA_MARKETS = {
     "Mongolia": "https://sejahteramarah.com/mobile/togel/pasaran-18",
     "New Mexico Day": "https://sejahteramarah.com/mobile/togel/pasaran-78",
     "New Mexico Eve": "https://sejahteramarah.com/mobile/togel/pasaran-79",
+    "Nusantara Pools": "https://sejahteramarah.com/mobile/togel/pasaran-22",
 }
 
 PRIORITY_ORDER = {
@@ -97,6 +98,7 @@ PRIORITY_ORDER = {
     "Mongolia": 65,
     "New Mexico Day": 66,
     "New Mexico Eve": 67,
+    "Nusantara Pools": 68,
 }
 
 def stringify_keys(obj):
