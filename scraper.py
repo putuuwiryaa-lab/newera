@@ -104,6 +104,7 @@ RAJAPAITO_MARKETS = {
     "Delaware Night": "https://w2.rajapaito1.net/data-togel-delaware-night/",
     "Ohio Midday": "https://w2.rajapaito1.net/data-togel-ohio-midday/",
     "Ohio Evening": "https://w2.rajapaito1.net/data-togel-ohio-evening/",
+    "West Virginia": "https://w2.rajapaito1.net/data-togel-west-virginia/",
 }
 
 PRIORITY_ORDER = {
@@ -123,6 +124,13 @@ PRIORITY_ORDER = {
     "Macau P4": 14,
     "Macau P5": 15,
     "Macau P6": 16,
+    "Pennsylvania Day": 27,
+    "Pennsylvania Evening": 28,
+    "Delaware Day": 29,
+    "Delaware Night": 30,
+    "Ohio Midday": 31,
+    "Ohio Evening": 32,
+    "West Virginia": 33,
     "Mongolia": 65,
     "New Mexico Day": 66,
     "New Mexico Eve": 67,
