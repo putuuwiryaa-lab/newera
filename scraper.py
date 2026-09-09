@@ -162,7 +162,7 @@ def scrape_market(url):
         for i in range(0, len(digits) - 3, 4):
             results.append(digits[i] + digits[i+1] + digits[i+2] + digits[i+3])
 
-        return ' '.join(results[-500:])
+        return ' '.join(results)
     except Exception as e:
         print(f"Error scraping {url}: {e}")
         return ''
@@ -214,27 +214,54 @@ def scrape_sejahtera_market(url, existing_history_str=""):
 
     new_reversed = list(reversed(all_draws))
     if not existing_history_str:
-        return " ".join(new_reversed[-500:])
+        return " ".join(new_reversed)
 
-    existing = existing_history_str.strip().split()
+    existing = [x for x in existing_history_str.strip().split() if len(x) == 4 and x.isdigit()]
     if not existing:
-        return " ".join(new_reversed[-500:])
+        return " ".join(new_reversed)
 
-    last_known = existing[-1]
-    if last_known in new_reversed:
-        last_idx = len(new_reversed) - 1 - new_reversed[::-1].index(last_known)
-        fresh_draws = new_reversed[last_idx + 1:]
-        if fresh_draws:
-            existing.extend(fresh_draws)
-    elif new_reversed:
-        for d in new_reversed:
-            if d != existing[-1]:
-                existing.append(d)
+    merged = merge_histories(existing, new_reversed)
+    return " ".join(merged)
 
-    return " ".join(existing[-500:])
+def merge_histories(existing_draws, scraped_draws):
+    """
+    Menggabungkan riwayat yang sudah ada di database dengan hasil scrap terbaru secara akumulatif.
+    Data historis lama tidak pernah dihapus/dipotong (riwayat terus bertambah > 500 putaran).
+    """
+    valid_existing = [d for d in existing_draws if len(d) == 4 and d.isdigit()]
+    valid_scraped = [d for d in scraped_draws if len(d) == 4 and d.isdigit()]
+
+    if not valid_existing:
+        return valid_scraped
+    if not valid_scraped:
+        return valid_existing
+
+    last_known = valid_existing[-1]
+    if last_known in valid_scraped:
+        last_idx = len(valid_scraped) - 1 - valid_scraped[::-1].index(last_known)
+        fresh = valid_scraped[last_idx + 1:]
+        if fresh:
+            return valid_existing + fresh
+        return valid_existing
+
+    # Cek overlap sub-sequence jika website hanya memuat potongan parsial
+    for k in range(min(len(valid_existing), 30), 0, -1):
+        suffix = valid_existing[-k:]
+        for j in range(len(valid_scraped) - k + 1):
+            if valid_scraped[j:j+k] == suffix:
+                fresh = valid_scraped[j+k:]
+                if fresh:
+                    return valid_existing + fresh
+                return valid_existing
+
+    # Fallback: jika draw terbaru di website berbeda dengan draw terakhir yang tersimpan
+    if valid_scraped[-1] != valid_existing[-1]:
+        return valid_existing + [valid_scraped[-1]]
+
+    return valid_existing
 
 def sync_market_data(db, market_id, data, current_order):
-    """Fungsi pembantu sinkronisasi, diffing, auto-tuning, dan penyimpanan ke Firestore."""
+    """Fungsi pembantu sinkronisasi, diffing, auto-tuning, dan penyimpanan akumulatif ke Firestore."""
     doc_payload = {
         'id': market_id,
         'name': market_id,
@@ -247,17 +274,21 @@ def sync_market_data(db, market_id, data, current_order):
         try:
             existing_doc = db.collection('markets').document(market_id).get()
             existing_data = existing_doc.to_dict() if existing_doc.exists else {}
-            existing_history = existing_data.get('history_data', '').split()
-            new_history = data.split()
+            existing_history = [x for x in existing_data.get('history_data', '').split() if len(x) == 4 and x.isdigit()]
+            scraped_history = [x for x in data.split() if len(x) == 4 and x.isdigit()]
+
+            merged_history = merge_histories(existing_history, scraped_history)
+            merged_history_str = " ".join(merged_history)
+            doc_payload['history_data'] = merged_history_str
 
             is_new_draw = (
-                len(new_history) > 0 and
-                (len(existing_history) == 0 or new_history[-1] != existing_history[-1])
+                len(merged_history) > 0 and
+                (len(existing_history) == 0 or merged_history[-1] != existing_history[-1])
             )
 
             tuning_info = {}
-            if is_new_draw and len(new_history) >= 15:
-                tuning_info = engine.audit_and_tune(new_history, existing_data.get('next_prediction'))
+            if is_new_draw and len(merged_history) >= 15:
+                tuning_info = engine.audit_and_tune(merged_history, existing_data.get('next_prediction'))
                 if tuning_info:
                     log_payload = {
                         'market_id': market_id,
@@ -267,7 +298,7 @@ def sync_market_data(db, market_id, data, current_order):
                         **tuning_info
                     }
                     db.collection('tuning_logs').add(stringify_keys(log_payload))
-                    print(f"🎯 [SMART TUNE] {market_id}: AI={tuning_info.get('status_ai')} | BBFS={tuning_info.get('status_bbfs')} (Result: {tuning_info.get('actual_result')})")
+                    print(f"🎯 [SMART TUNE] {market_id}: AI={tuning_info.get('status_ai')} | BBFS={tuning_info.get('status_bbfs')} (Result: {tuning_info.get('actual_result')} | Total: {len(merged_history)} draws)")
 
             if tuning_info.get('next_prediction'):
                 doc_payload['next_prediction'] = tuning_info['next_prediction']
@@ -286,8 +317,8 @@ def sync_market_data(db, market_id, data, current_order):
                 doc_payload['next_prediction'] = existing_data['next_prediction']
                 if existing_data.get('last_audit'):
                     doc_payload['last_audit'] = existing_data['last_audit']
-            elif len(new_history) >= 15:
-                initial_tune = engine.audit_and_tune(new_history, None)
+            elif len(merged_history) >= 15:
+                initial_tune = engine.audit_and_tune(merged_history, None)
                 if initial_tune and initial_tune.get('next_prediction'):
                     doc_payload['next_prediction'] = initial_tune['next_prediction']
                     doc_payload['last_audit'] = {
