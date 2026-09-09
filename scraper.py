@@ -277,6 +277,7 @@ def sync_market_data(db, market_id, data, current_order):
                     'actual_result': tuning_info.get('actual_result'),
                     'actual_2d': tuning_info.get('actual_2d'),
                     'is_twin': tuning_info.get('is_twin'),
+                    'paito_audit': tuning_info.get('paito_audit'),
                     'previous_prediction': tuning_info.get('previous_prediction'),
                     'ai_tuning': tuning_info.get('ai_tuning'),
                     'bbfs_tuning': tuning_info.get('bbfs_tuning')
@@ -295,6 +296,7 @@ def sync_market_data(db, market_id, data, current_order):
                         'actual_result': initial_tune.get('actual_result'),
                         'actual_2d': initial_tune.get('actual_2d'),
                         'is_twin': initial_tune.get('is_twin'),
+                        'paito_audit': initial_tune.get('paito_audit'),
                         'previous_prediction': initial_tune.get('previous_prediction'),
                         'ai_tuning': initial_tune.get('ai_tuning'),
                         'bbfs_tuning': initial_tune.get('bbfs_tuning')

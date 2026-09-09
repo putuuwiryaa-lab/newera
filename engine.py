@@ -84,7 +84,7 @@ def get_mistik_scores(history_2d: List[Tuple[int, int]], eval_window: int = 15) 
     for i in range(len(sub_hist) - 1):
         pk, pe = sub_hist[i]
         actual_set = set(sub_hist[i + 1])
-        for d in [pk, pe]:
+        for d in set([pk, pe]):
             if d in actual_set:
                 branch_hits["asli"] += 1
             if INDEX_MAP.get(d) in actual_set:
@@ -95,7 +95,7 @@ def get_mistik_scores(history_2d: List[Tuple[int, int]], eval_window: int = 15) 
                 branch_hits["mistik_baru"] += 1
 
     last_k, last_e = sub_hist[-1]
-    for d in [last_k, last_e]:
+    for d in set([last_k, last_e]):
         scores[d] += branch_hits["asli"]
         scores[INDEX_MAP[d]] += branch_hits["indeks"]
         scores[MISTIK_LAMA[d]] += branch_hits["mistik_lama"]
@@ -121,12 +121,13 @@ def rank_digits(history_2d: List[Tuple[int, int]], rolling_window: int = 20, tie
         weights = {"Momentum": 1.0, "Markov": 1.0, "Delta": 1.0, "Mistik": 1.0}
 
         if len(history_2d) > rolling_window + 5:
-            eval_slice = history_2d[-rolling_window:]
+            total_len = len(history_2d)
+            start_idx = total_len - rolling_window
             for m_name, m_func in methods.items():
                 hit_count = 0
-                for step in range(len(eval_slice) - 1):
-                    hist_until = history_2d[:-(rolling_window - step)]
-                    actual_next = set(eval_slice[step + 1])
+                for target_idx in range(start_idx, total_len):
+                    hist_until = history_2d[:target_idx]
+                    actual_next = set(history_2d[target_idx])
                     m_scores = m_func(hist_until)
                     top_candidates = sorted(m_scores.keys(), key=lambda d: m_scores[d], reverse=True)[:tier_size]
                     if any(d in actual_next for d in top_candidates):
@@ -248,16 +249,16 @@ def compute_dedicated_bbfs(history_2d: List[Tuple[int, int]], lookback: int = 50
         best_comb = None
         for comb in itertools.combinations(range(10), size):
             s = set(comb)
-            score = sum(joint_size[k][e] for k in s for e in s)
+            score = sum(joint_size[k][e] for k in s for e in s if k != e)
             if score > best_score:
                 best_score = score
                 best_comb = comb
         s = set(best_comb)
-        digit_contrib = {d: sum(joint_size[d][x] + joint_size[x][d] for x in s) for d in s}
+        digit_contrib = {d: sum(joint_size[d][x] + joint_size[x][d] for x in s if x != d) for d in s}
         res[size] = sorted(best_comb, key=lambda d: digit_contrib[d], reverse=True)
 
     base_joint = [[(k_scores[k] + k_trans[k] * 1.5) * (e_scores[e] + e_trans[e] * 1.5) + (pair_matrix[k][e] * 3.0) for e in range(10)] for k in range(10)]
-    bbfs_digit_scores = {d: sum(base_joint[d][x] + base_joint[x][d] for x in range(10)) for d in range(10)}
+    bbfs_digit_scores = {d: sum(base_joint[d][x] + base_joint[x][d] for x in range(10) if x != d) for d in range(10)}
     bbfs_ranked = sorted(bbfs_digit_scores.keys(), key=lambda d: bbfs_digit_scores[d], reverse=True)
     dead_digits = bbfs_ranked[-2:]
 
@@ -276,6 +277,230 @@ def generate_smart_trim(bbfs7_digits: List[int]) -> Dict[str, List[str]]:
     used = set(top10 + medium15)
     cadangan = [l for l in all_top7 if l not in used]
     return {"top10": top10, "medium15": medium15, "cadangan": cadangan}
+
+
+def generate_sniper_trim(digits: List[int], paito_pred: Dict, include_twins: bool = False) -> Dict:
+    """
+    Pemangkas Sniper 2D Berbasis Paito:
+    Menyaring baris BBFS menggunakan irisan Top 3 Biji dan Pola Paritas Utama.
+    """
+    lines = []
+    unique_digits = list(dict.fromkeys(digits))
+    for i in range(len(unique_digits)):
+        for j in range(len(unique_digits)):
+            if i == j:
+                if include_twins:
+                    lines.append(f"{unique_digits[i]}{unique_digits[j]}")
+            else:
+                lines.append(f"{unique_digits[i]}{unique_digits[j]}")
+
+    top_biji_set = set(paito_pred.get("top_biji", []))
+    primary_parity = paito_pred.get("primary_parity", "")
+
+    def get_parity(k: int, e: int) -> str:
+        kp = "Genap" if k % 2 == 0 else "Ganjil"
+        ep = "Genap" if e % 2 == 0 else "Ganjil"
+        return f"{kp}-{ep}"
+
+    sniper_top = []
+    sniper_secondary = []
+    cadangan = []
+
+    for l in lines:
+        k = int(l[0])
+        e = int(l[1])
+        biji = compute_biji(k, e)
+        parity = get_parity(k, e)
+
+        hit_biji = biji in top_biji_set
+        hit_parity = (parity == primary_parity)
+
+        if hit_biji and hit_parity:
+            sniper_top.append(l)
+        elif hit_biji:
+            sniper_secondary.append(l)
+        else:
+            cadangan.append(l)
+
+    kept_count = len(sniper_top) if len(sniper_top) > 0 else len(sniper_secondary)
+    efficiency_pct = round(((len(lines) - kept_count) / len(lines)) * 100) if lines else 0
+
+    return {
+        "sniper_top": sniper_top,
+        "sniper_secondary": sniper_secondary,
+        "cadangan": cadangan,
+        "efficiency_pct": efficiency_pct
+    }
+
+
+def compute_biji(k: int, e: int) -> int:
+    """Hitung Biji 2D (Digital Root): penjumlahan berulang Kepala + Ekor hingga 1 digit (0-9)."""
+    if k == 0 and e == 0:
+        return 0
+    s = k + e
+    while s >= 10:
+        s = (s // 10) + (s % 10)
+    return s
+
+
+def predict_paito_macro(history_2d: List[Tuple[int, int]], lookback: int = 50) -> Dict:
+    """
+    Prediksi Makro Paito:
+    1. Biji 2D (Markov transition, recency momentum, overdue gap tracker)
+    2. Pola Ganjil-Genap (4-state Markov, streak & overdue alert)
+    3. Kategori Besar-Kecil (2-state Markov & rolling bias)
+    """
+    if not history_2d:
+        return {
+            "top_biji": [1, 2, 3],
+            "biji_probabilities": {str(d): 0.1 for d in range(10)},
+            "primary_parity": "Genap-Ganjil",
+            "parity_probabilities": {"Genap-Genap": 0.25, "Genap-Ganjil": 0.25, "Ganjil-Genap": 0.25, "Ganjil-Ganjil": 0.25},
+            "primary_magnitude": "Kecil",
+            "magnitude_probabilities": {"Besar": 0.5, "Kecil": 0.5},
+            "overdue_alerts": [],
+            "confidence_score": 60
+        }
+
+    sub = history_2d[-lookback:]
+
+    # 1. Analisis Biji 2D
+    biji_history = [compute_biji(k, e) for k, e in sub]
+    last_biji = biji_history[-1]
+
+    # Transisi Markov Biji
+    biji_trans = defaultdict(float)
+    for i in range(len(biji_history) - 1):
+        if biji_history[i] == last_biji:
+            biji_trans[biji_history[i + 1]] += 1.0
+
+    # Recency Decay Momentum
+    biji_momentum = defaultdict(float)
+    for idx, b in enumerate(biji_history):
+        decay = math.exp(0.06 * (idx - len(biji_history) + 1))
+        biji_momentum[b] += decay
+
+    # Gap / Overdue Tracker Biji
+    biji_gap = {d: 0 for d in range(10)}
+    for d in range(10):
+        found = False
+        for step, b in enumerate(reversed(biji_history)):
+            if b == d:
+                biji_gap[d] = step
+                found = True
+                break
+        if not found:
+            biji_gap[d] = len(biji_history)
+
+    # Skor gabungan Biji (Momentum + Markov + Mean Reversion jika gap >= 12)
+    biji_scores = {}
+    for d in range(10):
+        m_score = biji_momentum[d]
+        t_score = biji_trans[d] * 1.5
+        gap_bonus = 1.2 if biji_gap[d] >= 12 else 0.0
+        biji_scores[d] = m_score + t_score + gap_bonus
+
+    tot_biji_score = sum(biji_scores.values()) or 1.0
+    biji_probs = {d: round(biji_scores[d] / tot_biji_score, 3) for d in range(10)}
+    ranked_biji = sorted(range(10), key=lambda d: biji_scores[d], reverse=True)
+    top_biji = ranked_biji[:3]
+
+    # 2. Analisis Ganjil-Genap (4 Kuadran: GG, GJ, JG, JJ)
+    PARITY_STATES = ["Genap-Genap", "Genap-Ganjil", "Ganjil-Genap", "Ganjil-Ganjil"]
+    def get_parity(k: int, e: int) -> str:
+        kp = "Genap" if k % 2 == 0 else "Ganjil"
+        ep = "Genap" if e % 2 == 0 else "Ganjil"
+        return f"{kp}-{ep}"
+
+    parity_history = [get_parity(k, e) for k, e in sub]
+    last_parity = parity_history[-1]
+
+    parity_trans = defaultdict(float)
+    for i in range(len(parity_history) - 1):
+        if parity_history[i] == last_parity:
+            parity_trans[parity_history[i + 1]] += 1.0
+
+    parity_momentum = defaultdict(float)
+    for idx, p in enumerate(parity_history):
+        decay = math.exp(0.08 * (idx - len(parity_history) + 1))
+        parity_momentum[p] += decay
+
+    # Gap Tracker Parity
+    parity_gap = {p: 0 for p in PARITY_STATES}
+    for p in PARITY_STATES:
+        found = False
+        for step, val in enumerate(reversed(parity_history)):
+            if val == p:
+                parity_gap[p] = step
+                found = True
+                break
+        if not found:
+            parity_gap[p] = len(parity_history)
+
+    parity_scores = {}
+    for p in PARITY_STATES:
+        reversion = 1.5 if parity_gap[p] >= 8 else 0.0
+        parity_scores[p] = parity_momentum[p] + parity_trans[p] * 2.0 + reversion
+
+    tot_parity = sum(parity_scores.values()) or 1.0
+    parity_probs = {p: round(parity_scores[p] / tot_parity, 3) for p in PARITY_STATES}
+    primary_parity = max(PARITY_STATES, key=lambda p: parity_scores[p])
+
+    # 3. Analisis Kategori Besar-Kecil (2D: >= 50 Besar, < 50 Kecil)
+    magnitude_history = ["Besar" if (k * 10 + e) >= 50 else "Kecil" for k, e in sub]
+    last_mag = magnitude_history[-1]
+
+    mag_trans = defaultdict(float)
+    for i in range(len(magnitude_history) - 1):
+        if magnitude_history[i] == last_mag:
+            mag_trans[magnitude_history[i + 1]] += 1.0
+
+    mag_momentum = defaultdict(float)
+    for idx, m in enumerate(magnitude_history):
+        decay = math.exp(0.08 * (idx - len(magnitude_history) + 1))
+        mag_momentum[m] += decay
+
+    mag_scores = {
+        "Besar": mag_momentum["Besar"] + mag_trans["Besar"] * 1.5,
+        "Kecil": mag_momentum["Kecil"] + mag_trans["Kecil"] * 1.5
+    }
+    tot_mag = sum(mag_scores.values()) or 1.0
+    mag_probs = {m: round(mag_scores[m] / tot_mag, 3) for m in ["Besar", "Kecil"]}
+    primary_magnitude = "Besar" if mag_scores["Besar"] >= mag_scores["Kecil"] else "Kecil"
+
+    # 4. Deteksi Overdue Alerts (Anomali Gap)
+    overdue_alerts = []
+    for p, g in parity_gap.items():
+        if g >= 8:
+            overdue_alerts.append({
+                "type": "parity",
+                "label": f"Pola {p}",
+                "gap": g,
+                "alert_level": "EKSTREM" if g >= 12 else "WASPADA"
+            })
+
+    for d, g in biji_gap.items():
+        if g >= 14:
+            overdue_alerts.append({
+                "type": "biji",
+                "label": f"Biji {d}",
+                "gap": g,
+                "alert_level": "EKSTREM" if g >= 20 else "WASPADA"
+            })
+
+    # Confidence score 60 - 92%
+    conf = int(min(92, max(60, 60 + (parity_probs[primary_parity] * 40) + (mag_probs[primary_magnitude] * 20))))
+
+    return {
+        "top_biji": top_biji,
+        "biji_probabilities": {str(k): v for k, v in biji_probs.items()},
+        "primary_parity": primary_parity,
+        "parity_probabilities": parity_probs,
+        "primary_magnitude": primary_magnitude,
+        "magnitude_probabilities": mag_probs,
+        "overdue_alerts": overdue_alerts,
+        "confidence_score": conf
+    }
 
 
 def audit_and_tune(results_4d: List[str], saved_prediction: Dict = None) -> Dict:
@@ -389,11 +614,9 @@ def audit_and_tune(results_4d: List[str], saved_prediction: Dict = None) -> Dict
             top3 = sorted(scores.keys(), key=lambda d: scores[d], reverse=True)[:3]
             hit_method = (actual_k in top3 or actual_e in top3)
             prev_w = float(calibrated_weights.get(m_name, 10.0))
-
-            prev_streak = method_streaks.get(m_name, 0)
-            current_streak_len = (prev_streak + 1) if (hit_method and prev_streak > 0) else (
-                (abs(prev_streak) + 1) if (not hit_method and prev_streak < 0) else 1
-            )
+            # method_streaks[m_name] sudah mencakup evaluasi draw T (aktual)
+            streak_val = method_streaks.get(m_name, 1 if hit_method else -1)
+            current_streak_len = max(1, abs(streak_val))
 
             # 1. Streak-Aware Learning Rate (η):
             # Streak 1 (fluktuasi harian / noise): η = 0.08 (±8%)
@@ -517,10 +740,39 @@ def audit_and_tune(results_4d: List[str], saved_prediction: Dict = None) -> Dict
 
     all_bbfs_frozen = all(audit["action"] == "FREEZE" for audit in bbfs_tier_audits.values())
 
+    next_paito = predict_paito_macro(full_history_2d)
+
+    # Audit Makro Paito & Sniper BOM periode kemarin
+    paito_pred_t_minus_1 = saved_prediction.get("paito") if (saved_prediction and "paito" in saved_prediction) else predict_paito_macro(history_before)
+    actual_biji = compute_biji(actual_k, actual_e)
+    actual_parity = f"{'Genap' if actual_k % 2 == 0 else 'Ganjil'}-{'Genap' if actual_e % 2 == 0 else 'Ganjil'}"
+    actual_magnitude = "Besar" if (actual_k * 10 + actual_e >= 50) else "Kecil"
+
+    hit_biji = actual_biji in paito_pred_t_minus_1.get("top_biji", [])
+    hit_parity = (actual_parity == paito_pred_t_minus_1.get("primary_parity"))
+    hit_magnitude = (actual_magnitude == paito_pred_t_minus_1.get("primary_magnitude"))
+
+    sniper_res_t_minus_1 = generate_sniper_trim(predicted_bbfs7, paito_pred_t_minus_1, include_twins=False)
+    actual_2d_str = f"{actual_k}{actual_e}"
+    hit_sniper_bom = (not is_twin) and (actual_2d_str in sniper_res_t_minus_1.get("sniper_top", []))
+    hit_sniper_sec = (not is_twin) and (actual_2d_str in sniper_res_t_minus_1.get("sniper_secondary", []))
+
+    paito_audit = {
+        "actual_biji": actual_biji,
+        "actual_parity": actual_parity,
+        "actual_magnitude": actual_magnitude,
+        "hit_biji": hit_biji,
+        "hit_parity": hit_parity,
+        "hit_magnitude": hit_magnitude,
+        "sniper_status": "BOM_HIT" if hit_sniper_bom else ("SECONDARY_HIT" if hit_sniper_sec else "MISSED"),
+        "strike_status": "PERFECT_STRIKE" if (hit_biji and hit_parity and hit_magnitude) else f"{sum([hit_biji, hit_parity, hit_magnitude])}/3_HIT"
+    }
+
     return {
         "actual_result": last_full,
         "actual_2d": f"{actual_k}{actual_e}",
         "is_twin": is_twin,
+        "paito_audit": paito_audit,
         "previous_prediction": {
             "ai4": predicted_ai4,
             "bbfs7": predicted_bbfs7,
@@ -571,6 +823,7 @@ def audit_and_tune(results_4d: List[str], saved_prediction: Dict = None) -> Dict
             "bbfs8": next_bbfs[8],
             "bbfs9": next_bbfs[9],
             "bbfs_tier_weights": {str(k): v for k, v in next_bbfs_weights.items()},
-            "dead_digits": next_dead_digits
+            "dead_digits": next_dead_digits,
+            "paito": next_paito
         }
     }
