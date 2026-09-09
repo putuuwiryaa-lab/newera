@@ -279,58 +279,49 @@ def generate_smart_trim(bbfs7_digits: List[int]) -> Dict[str, List[str]]:
     return {"top10": top10, "medium15": medium15, "cadangan": cadangan}
 
 
-def generate_sniper_trim(digits: List[int], paito_pred: Dict, include_twins: bool = False) -> Dict:
-    """
-    Pemangkas Sniper 2D Berbasis Paito:
-    Menyaring baris BBFS menggunakan irisan Top 3 Biji dan Pola Paritas Utama.
-    """
-    lines = []
-    unique_digits = list(dict.fromkeys(digits))
-    for i in range(len(unique_digits)):
-        for j in range(len(unique_digits)):
-            if i == j:
-                if include_twins:
-                    lines.append(f"{unique_digits[i]}{unique_digits[j]}")
-            else:
-                lines.append(f"{unique_digits[i]}{unique_digits[j]}")
+# ==============================================================================
+# 5. SHIO 2026 (TAHUN KUDA API / FIRE HORSE) & BIJI
+# ==============================================================================
+SHIO_2026_DATA = [
+    {"no": 1, "name": "Kuda", "emoji": "🐴", "jalur": 1, "numbers": ["01", "13", "25", "37", "49", "61", "73", "85", "97"]},
+    {"no": 2, "name": "Ular", "emoji": "🐍", "jalur": 2, "numbers": ["02", "14", "26", "38", "50", "62", "74", "86", "98"]},
+    {"no": 3, "name": "Naga", "emoji": "🐲", "jalur": 3, "numbers": ["03", "15", "27", "39", "51", "63", "75", "87", "99"]},
+    {"no": 4, "name": "Kelinci", "emoji": "🐇", "jalur": 1, "numbers": ["00", "04", "16", "28", "40", "52", "64", "76", "88"]},
+    {"no": 5, "name": "Harimau", "emoji": "🐯", "jalur": 2, "numbers": ["05", "17", "29", "41", "53", "65", "77", "89"]},
+    {"no": 6, "name": "Kerbau", "emoji": "🐂", "jalur": 3, "numbers": ["06", "18", "30", "42", "54", "66", "78", "90"]},
+    {"no": 7, "name": "Tikus", "emoji": "🐀", "jalur": 1, "numbers": ["07", "19", "31", "43", "55", "67", "79", "91"]},
+    {"no": 8, "name": "Babi", "emoji": "🐷", "jalur": 2, "numbers": ["08", "20", "32", "44", "56", "68", "80", "92"]},
+    {"no": 9, "name": "Anjing", "emoji": "🐶", "jalur": 3, "numbers": ["09", "21", "33", "45", "57", "69", "81", "93"]},
+    {"no": 10, "name": "Ayam", "emoji": "🐔", "jalur": 1, "numbers": ["10", "22", "34", "46", "58", "70", "82", "94"]},
+    {"no": 11, "name": "Monyet", "emoji": "🐵", "jalur": 2, "numbers": ["11", "23", "35", "47", "59", "71", "83", "95"]},
+    {"no": 12, "name": "Kambing", "emoji": "🐐", "jalur": 3, "numbers": ["12", "24", "36", "48", "60", "72", "84", "96"]},
+]
 
-    top_biji_set = set(paito_pred.get("top_biji", []))
-    primary_parity = paito_pred.get("primary_parity", "")
+NUM_TO_SHIO_2026 = {}
+for s_item in SHIO_2026_DATA:
+    for n_str in s_item["numbers"]:
+        NUM_TO_SHIO_2026[n_str] = s_item
 
-    def get_parity(k: int, e: int) -> str:
-        kp = "Genap" if k % 2 == 0 else "Ganjil"
-        ep = "Genap" if e % 2 == 0 else "Ganjil"
-        return f"{kp}-{ep}"
+def get_shio_2026(val_2d) -> Dict:
+    if isinstance(val_2d, int):
+        val_str = f"{val_2d:02d}"
+    else:
+        val_str = str(val_2d).zfill(2)
 
-    sniper_top = []
-    sniper_secondary = []
-    cadangan = []
+    if val_str in NUM_TO_SHIO_2026:
+        return NUM_TO_SHIO_2026[val_str]
 
-    for l in lines:
-        k = int(l[0])
-        e = int(l[1])
-        biji = compute_biji(k, e)
-        parity = get_parity(k, e)
+    try:
+        val = int(val_str)
+    except:
+        return SHIO_2026_DATA[0]
 
-        hit_biji = biji in top_biji_set
-        hit_parity = (parity == primary_parity)
-
-        if hit_biji and hit_parity:
-            sniper_top.append(l)
-        elif hit_biji:
-            sniper_secondary.append(l)
-        else:
-            cadangan.append(l)
-
-    kept_count = len(sniper_top) if len(sniper_top) > 0 else len(sniper_secondary)
-    efficiency_pct = round(((len(lines) - kept_count) / len(lines)) * 100) if lines else 0
-
-    return {
-        "sniper_top": sniper_top,
-        "sniper_secondary": sniper_secondary,
-        "cadangan": cadangan,
-        "efficiency_pct": efficiency_pct
-    }
+    if val == 0:
+        val = 100
+    rem = val % 12
+    if rem == 0:
+        rem = 12
+    return SHIO_2026_DATA[rem - 1]
 
 
 def compute_biji(k: int, e: int) -> int:
@@ -343,12 +334,74 @@ def compute_biji(k: int, e: int) -> int:
     return s
 
 
+def generate_sniper_trim(digits: List[int], paito_pred: Dict, include_twins: bool = False) -> Dict:
+    """
+    Pemangkas Sniper 2D Berbasis Paito:
+    Menyaring baris BBFS menggunakan irisan Top 3 Biji, Pola Paritas Utama, dan Shio 2026.
+    """
+    lines = []
+    unique_digits = list(dict.fromkeys(digits))
+    for i in range(len(unique_digits)):
+        for j in range(len(unique_digits)):
+            if i == j:
+                if include_twins:
+                    lines.append(f"{unique_digits[i]}{unique_digits[j]}")
+            else:
+                lines.append(f"{unique_digits[i]}{unique_digits[j]}")
+
+    top_biji_set = set(paito_pred.get("top_biji", []))
+    top_shio_set = set(paito_pred.get("top_shios", []))
+    primary_parity = paito_pred.get("primary_parity", "")
+
+    def get_parity(k: int, e: int) -> str:
+        kp = "Genap" if k % 2 == 0 else "Ganjil"
+        ep = "Genap" if e % 2 == 0 else "Ganjil"
+        return f"{kp}-{ep}"
+
+    sniper_top = []
+    sniper_secondary = []
+    super_sniper_shio = []
+    cadangan = []
+
+    for l in lines:
+        k = int(l[0])
+        e = int(l[1])
+        biji = compute_biji(k, e)
+        parity = get_parity(k, e)
+        shio_obj = get_shio_2026(k * 10 + e)
+
+        hit_biji = biji in top_biji_set
+        hit_parity = (parity == primary_parity)
+        hit_shio = shio_obj["no"] in top_shio_set
+
+        if hit_biji and hit_parity:
+            sniper_top.append(l)
+            if hit_shio:
+                super_sniper_shio.append(l)
+        elif hit_biji:
+            sniper_secondary.append(l)
+        else:
+            cadangan.append(l)
+
+    kept_count = len(super_sniper_shio) if len(super_sniper_shio) > 0 else (len(sniper_top) if len(sniper_top) > 0 else len(sniper_secondary))
+    efficiency_pct = round(((len(lines) - kept_count) / len(lines)) * 100) if lines else 0
+
+    return {
+        "sniper_top": sniper_top,
+        "sniper_secondary": sniper_secondary,
+        "super_sniper_shio": super_sniper_shio,
+        "cadangan": cadangan,
+        "efficiency_pct": efficiency_pct
+    }
+
+
 def predict_paito_macro(history_2d: List[Tuple[int, int]], lookback: int = 50) -> Dict:
     """
     Prediksi Makro Paito:
     1. Biji 2D (Markov transition, recency momentum, overdue gap tracker)
     2. Pola Ganjil-Genap (4-state Markov, streak & overdue alert)
     3. Kategori Besar-Kecil (2-state Markov & rolling bias)
+    4. Shio 2026 (Tahun Kuda Api: 12 Shio Markov, Recency Decay, 3 Jalur & Overdue Gap Tracker)
     """
     if not history_2d:
         return {
@@ -358,6 +411,11 @@ def predict_paito_macro(history_2d: List[Tuple[int, int]], lookback: int = 50) -
             "parity_probabilities": {"Genap-Genap": 0.25, "Genap-Ganjil": 0.25, "Ganjil-Genap": 0.25, "Ganjil-Ganjil": 0.25},
             "primary_magnitude": "Kecil",
             "magnitude_probabilities": {"Besar": 0.5, "Kecil": 0.5},
+            "top_shios": [1, 2, 3],
+            "primary_jalur": 1,
+            "shio_probabilities": {str(s): 0.083 for s in range(1, 13)},
+            "jalur_probabilities": {"1": 0.334, "2": 0.333, "3": 0.333},
+            "overdue_shios": [],
             "overdue_alerts": [],
             "confidence_score": 60
         }
@@ -468,7 +526,50 @@ def predict_paito_macro(history_2d: List[Tuple[int, int]], lookback: int = 50) -
     mag_probs = {m: round(mag_scores[m] / tot_mag, 3) for m in ["Besar", "Kecil"]}
     primary_magnitude = "Besar" if mag_scores["Besar"] >= mag_scores["Kecil"] else "Kecil"
 
-    # 4. Deteksi Overdue Alerts (Anomali Gap)
+    # 4. Analisis Shio 2026 (Tahun Kuda Api)
+    shio_history = [get_shio_2026(k * 10 + e)["no"] for k, e in sub]
+    last_shio = shio_history[-1]
+
+    shio_trans = defaultdict(float)
+    for i in range(len(shio_history) - 1):
+        if shio_history[i] == last_shio:
+            shio_trans[shio_history[i + 1]] += 1.0
+
+    shio_momentum = defaultdict(float)
+    for idx, s in enumerate(shio_history):
+        decay = math.exp(0.06 * (idx - len(shio_history) + 1))
+        shio_momentum[s] += decay
+
+    shio_gap = {s: len(shio_history) for s in range(1, 13)}
+    for s in range(1, 13):
+        for step, val in enumerate(reversed(shio_history)):
+            if val == s:
+                shio_gap[s] = step
+                break
+
+    shio_scores = {}
+    for s in range(1, 13):
+        m_score = shio_momentum[s]
+        t_score = shio_trans[s] * 1.5
+        gap_bonus = 1.5 if shio_gap[s] >= 14 else 0.0
+        shio_scores[s] = m_score + t_score + gap_bonus
+
+    tot_shio = sum(shio_scores.values()) or 1.0
+    shio_probs = {s: round(shio_scores[s] / tot_shio, 3) for s in range(1, 13)}
+    top_shios = sorted(range(1, 13), key=lambda s: shio_scores[s], reverse=True)[:3]
+
+    # Jalur Shio (Jalur 1: 1, 4, 7, 10 | Jalur 2: 2, 5, 8, 11 | Jalur 3: 3, 6, 9, 12)
+    jalur_map = {
+        1: [1, 4, 7, 10],
+        2: [2, 5, 8, 11],
+        3: [3, 6, 9, 12]
+    }
+    jalur_scores = {j: sum(shio_probs[s] for s in shios) for j, shios in jalur_map.items()}
+    tot_jalur = sum(jalur_scores.values()) or 1.0
+    jalur_probs = {j: round(jalur_scores[j] / tot_jalur, 3) for j in [1, 2, 3]}
+    primary_jalur = max([1, 2, 3], key=lambda j: jalur_probs[j])
+
+    # 5. Deteksi Overdue Alerts (Anomali Gap)
     overdue_alerts = []
     for p, g in parity_gap.items():
         if g >= 8:
@@ -488,6 +589,28 @@ def predict_paito_macro(history_2d: List[Tuple[int, int]], lookback: int = 50) -
                 "alert_level": "EKSTREM" if g >= 20 else "WASPADA"
             })
 
+    # Overdue Shios Tracker
+    overdue_shios = []
+    for s_item in SHIO_2026_DATA:
+        s_no = s_item["no"]
+        g = shio_gap[s_no]
+        if g >= 14:
+            alert_lvl = "EKSTREM" if g >= 20 else "WASPADA"
+            overdue_shios.append({
+                "number": s_no,
+                "name": s_item["name"],
+                "emoji": s_item["emoji"],
+                "jalur": s_item["jalur"],
+                "gap": g,
+                "alert_level": alert_lvl
+            })
+            overdue_alerts.append({
+                "type": "shio",
+                "label": f"Shio {s_item['emoji']} {s_item['name']} ({s_no:02d})",
+                "gap": g,
+                "alert_level": alert_lvl
+            })
+
     # Confidence score 60 - 92%
     conf = int(min(92, max(60, 60 + (parity_probs[primary_parity] * 40) + (mag_probs[primary_magnitude] * 20))))
 
@@ -498,6 +621,11 @@ def predict_paito_macro(history_2d: List[Tuple[int, int]], lookback: int = 50) -
         "parity_probabilities": parity_probs,
         "primary_magnitude": primary_magnitude,
         "magnitude_probabilities": mag_probs,
+        "top_shios": top_shios,
+        "primary_jalur": primary_jalur,
+        "shio_probabilities": {str(k): v for k, v in shio_probs.items()},
+        "jalur_probabilities": {str(k): v for k, v in jalur_probs.items()},
+        "overdue_shios": overdue_shios,
         "overdue_alerts": overdue_alerts,
         "confidence_score": conf
     }
@@ -747,25 +875,40 @@ def audit_and_tune(results_4d: List[str], saved_prediction: Dict = None) -> Dict
     actual_biji = compute_biji(actual_k, actual_e)
     actual_parity = f"{'Genap' if actual_k % 2 == 0 else 'Ganjil'}-{'Genap' if actual_e % 2 == 0 else 'Ganjil'}"
     actual_magnitude = "Besar" if (actual_k * 10 + actual_e >= 50) else "Kecil"
+    actual_shio_obj = get_shio_2026(actual_k * 10 + actual_e)
+    actual_shio = actual_shio_obj["no"]
+    actual_shio_name = f"{actual_shio_obj['emoji']} {actual_shio_obj['name']}"
+    actual_jalur = actual_shio_obj["jalur"]
 
     hit_biji = actual_biji in paito_pred_t_minus_1.get("top_biji", [])
     hit_parity = (actual_parity == paito_pred_t_minus_1.get("primary_parity"))
     hit_magnitude = (actual_magnitude == paito_pred_t_minus_1.get("primary_magnitude"))
+    hit_shio = actual_shio in paito_pred_t_minus_1.get("top_shios", [])
+    hit_jalur = (actual_jalur == paito_pred_t_minus_1.get("primary_jalur"))
 
     sniper_res_t_minus_1 = generate_sniper_trim(predicted_bbfs7, paito_pred_t_minus_1, include_twins=False)
     actual_2d_str = f"{actual_k}{actual_e}"
+    hit_super_sniper = (not is_twin) and (actual_2d_str in sniper_res_t_minus_1.get("super_sniper_shio", []))
     hit_sniper_bom = (not is_twin) and (actual_2d_str in sniper_res_t_minus_1.get("sniper_top", []))
     hit_sniper_sec = (not is_twin) and (actual_2d_str in sniper_res_t_minus_1.get("sniper_secondary", []))
+
+    total_hits = sum([hit_biji, hit_parity, hit_magnitude, hit_shio])
+    strike_status = "PERFECT_STRIKE" if total_hits == 4 else f"{total_hits}/4_HIT"
 
     paito_audit = {
         "actual_biji": actual_biji,
         "actual_parity": actual_parity,
         "actual_magnitude": actual_magnitude,
+        "actual_shio": actual_shio,
+        "actual_shio_name": actual_shio_name,
+        "actual_jalur": actual_jalur,
         "hit_biji": hit_biji,
         "hit_parity": hit_parity,
         "hit_magnitude": hit_magnitude,
-        "sniper_status": "BOM_HIT" if hit_sniper_bom else ("SECONDARY_HIT" if hit_sniper_sec else "MISSED"),
-        "strike_status": "PERFECT_STRIKE" if (hit_biji and hit_parity and hit_magnitude) else f"{sum([hit_biji, hit_parity, hit_magnitude])}/3_HIT"
+        "hit_shio": hit_shio,
+        "hit_jalur": hit_jalur,
+        "sniper_status": "SUPER_BOM_HIT" if hit_super_sniper else ("BOM_HIT" if hit_sniper_bom else ("SECONDARY_HIT" if hit_sniper_sec else "MISSED")),
+        "strike_status": strike_status
     }
 
     return {
