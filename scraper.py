@@ -91,6 +91,21 @@ SEJAHTERA_MARKETS = {
     "Nusantara Pools": "https://sejahteramarah.com/mobile/togel/pasaran-22",
 }
 
+RAJAPAITO_MARKETS = {
+    "Macau P1": "https://w2.rajapaito1.net/data-togel-macau-p1/",
+    "Macau P2": "https://w2.rajapaito1.net/data-togel-macau-p2/",
+    "Macau P3": "https://w2.rajapaito1.net/data-togel-macau-p3/",
+    "Macau P4": "https://w2.rajapaito1.net/data-togel-macau-p4/",
+    "Macau P5": "https://w2.rajapaito1.net/data-togel-macau-p5/",
+    "Macau P6": "https://w2.rajapaito1.net/data-togel-macau-p6/",
+    "Pennsylvania Day": "https://w2.rajapaito1.net/data-togel-pennsylvania-day/",
+    "Pennsylvania Evening": "https://w2.rajapaito1.net/data-togel-pennsylvania-evening/",
+    "Delaware Day": "https://w2.rajapaito1.net/data-togel-delaware-day/",
+    "Delaware Night": "https://w2.rajapaito1.net/data-togel-delaware-night/",
+    "Ohio Midday": "https://w2.rajapaito1.net/data-togel-ohio-midday/",
+    "Ohio Evening": "https://w2.rajapaito1.net/data-togel-ohio-evening/",
+}
+
 PRIORITY_ORDER = {
     "Magnum Cambodia": 1,
     "Sydneypools": 2,
@@ -102,6 +117,12 @@ PRIORITY_ORDER = {
     "Taiwan": 8,
     "Hongkong Pools": 9,
     "Hongkong Lotto": 10,
+    "Macau P1": 11,
+    "Macau P2": 12,
+    "Macau P3": 13,
+    "Macau P4": 14,
+    "Macau P5": 15,
+    "Macau P6": 16,
     "Mongolia": 65,
     "New Mexico Day": 66,
     "New Mexico Eve": 67,
@@ -229,6 +250,49 @@ def scrape_sejahtera_market(url, existing_history_str=""):
 
     merged = merge_histories(existing, new_reversed)
     return " ".join(merged)
+
+def scrape_rajapaito_market(url):
+    """Scrape data pengeluaran dari server Rajapaito secara penuh (tanpa limit pemotongan)."""
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/121.0.0.0 Safari/537.36"
+        ),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7",
+    }
+    try:
+        res = requests.get(url, headers=headers, timeout=25, verify=False)
+        res.raise_for_status()
+
+        soup = BeautifulSoup(res.text, "html.parser")
+        table = soup.select_one("table.keluaran-table") or soup.find("table")
+        if not table:
+            return ""
+
+        results = []
+        for row in table.find_all("tr"):
+            cells = [cell.get_text(" ", strip=True) for cell in row.find_all(["td", "th"])]
+            if not cells:
+                continue
+            row_text = " ".join(cells).upper()
+            if "TAHUN" in row_text or any(day in row_text for day in ["SENIN", "SELASA", "RABU", "KAMIS", "JUMAT", "SABTU", "MINGGU"]):
+                continue
+            for cell in cells:
+                val = cell.strip()
+                if re.fullmatch(r"\d{4}", val):
+                    results.append(val)
+
+        cleaned = []
+        for item in results:
+            if not cleaned or cleaned[-1] != item:
+                cleaned.append(item)
+
+        return " ".join(cleaned)
+    except Exception as e:
+        print(f"Error scraping Rajapaito {url}: {e}")
+        return ""
 
 def merge_histories(existing_draws, scraped_draws):
     """
@@ -377,12 +441,12 @@ def sync_market_data(db, market_id, data, current_order):
 
 def main():
     db = init_firebase()
-    next_order = 11
+    next_order = 17
     success = 0
     errors = 0
 
-    total_all = len(MARKETS) + len(SEJAHTERA_MARKETS)
-    print(f"Memulai scraping {total_all} pasaran ({len(MARKETS)} standar + {len(SEJAHTERA_MARKETS)} Sejahtera)...\n")
+    total_all = len(MARKETS) + len(SEJAHTERA_MARKETS) + len(RAJAPAITO_MARKETS)
+    print(f"Memulai scraping {total_all} pasaran ({len(MARKETS)} standar + {len(SEJAHTERA_MARKETS)} Sejahtera + {len(RAJAPAITO_MARKETS)} Rajapaito)...\n")
 
     # 1. Scrape Pasaran Server Standar
     for market_id, url in MARKETS.items():
@@ -424,6 +488,24 @@ def main():
                 errors += 1
         else:
             print(f"SKIP: {market_id} (data kosong Sejahtera)")
+            errors += 1
+
+        delay = random.uniform(1.0, 2.0)
+        time.sleep(delay)
+
+    # 3. Scrape Pasaran Rajapaito (Macau P1-P6, Pennsylvania, Delaware, Ohio)
+    for market_id, url in RAJAPAITO_MARKETS.items():
+        data = scrape_rajapaito_market(url)
+        if data:
+            current_order = PRIORITY_ORDER.get(market_id, next_order)
+            if market_id not in PRIORITY_ORDER:
+                next_order += 1
+            if sync_market_data(db, market_id, data, current_order):
+                success += 1
+            else:
+                errors += 1
+        else:
+            print(f"SKIP: {market_id} (data kosong Rajapaito)")
             errors += 1
 
         delay = random.uniform(1.0, 2.0)
