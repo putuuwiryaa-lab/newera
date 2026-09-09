@@ -1,8 +1,9 @@
+import sys
+import os
 import requests
 import re
 import time
 import random
-import os
 import json
 import base64
 import urllib3
@@ -10,6 +11,12 @@ from bs4 import BeautifulSoup
 import firebase_admin
 from firebase_admin import credentials, firestore
 import engine
+
+if hasattr(sys.stdout, 'reconfigure'):
+    try:
+        sys.stdout.reconfigure(encoding='utf-8')
+    except Exception:
+        pass
 
 # Nonaktifkan warning SSL karena server paito menggunakan sertifikat self-signed/khusus
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -225,8 +232,10 @@ def scrape_sejahtera_market(url, existing_history_str=""):
 
 def merge_histories(existing_draws, scraped_draws):
     """
-    Menggabungkan riwayat yang sudah ada di database dengan hasil scrap terbaru secara akumulatif.
-    Data historis lama tidak pernah dihapus/dipotong (riwayat terus bertambah > 500 putaran).
+    Menggabungkan riwayat yang sudah ada di database dengan hasil scrap secara dua arah (bidirectional):
+    1. Melakukan backfill riwayat lama (jika server sumber memiliki arsip putaran lebih panjang > 500).
+    2. Menambahkan putaran terbaru (fresh draw) di akhir barisan secara akumulatif.
+    3. Mencegah duplikasi data dengan pencocokan window sub-sequence.
     """
     valid_existing = [d for d in existing_draws if len(d) == 4 and d.isdigit()]
     valid_scraped = [d for d in scraped_draws if len(d) == 4 and d.isdigit()]
@@ -236,28 +245,48 @@ def merge_histories(existing_draws, scraped_draws):
     if not valid_scraped:
         return valid_existing
 
-    last_known = valid_existing[-1]
-    if last_known in valid_scraped:
-        last_idx = len(valid_scraped) - 1 - valid_scraped[::-1].index(last_known)
-        fresh = valid_scraped[last_idx + 1:]
-        if fresh:
-            return valid_existing + fresh
-        return valid_existing
+    # 1. Cari titik temu awal (alignment start) valid_existing di dalam valid_scraped
+    # Ini memungkinkan backfill data historis lama jika scraped punya arsip sebelum existing[0]
+    window_size = min(len(valid_existing), 20)
+    found_start_idx = -1
+    for k in range(window_size, 4, -1):
+        sample = valid_existing[:k]
+        for i in range(len(valid_scraped) - k + 1):
+            if valid_scraped[i:i+k] == sample:
+                found_start_idx = i
+                break
+        if found_start_idx != -1:
+            break
 
-    # Cek overlap sub-sequence jika website hanya memuat potongan parsial
-    for k in range(min(len(valid_existing), 30), 0, -1):
-        suffix = valid_existing[-k:]
-        for j in range(len(valid_scraped) - k + 1):
-            if valid_scraped[j:j+k] == suffix:
-                fresh = valid_scraped[j+k:]
-                if fresh:
-                    return valid_existing + fresh
-                return valid_existing
+    if found_start_idx != -1:
+        older = valid_scraped[:found_start_idx]
+        combined = older + valid_existing
+        # Cek apakah scraped memiliki putaran baru di bagian ekor (setelah last draw)
+        last_known = combined[-1]
+        if last_known in valid_scraped:
+            last_idx = len(valid_scraped) - 1 - valid_scraped[::-1].index(last_known)
+            newer = valid_scraped[last_idx + 1:]
+            combined = combined + newer
+        return combined
 
-    # Fallback: jika draw terbaru di website berbeda dengan draw terakhir yang tersimpan
-    if valid_scraped[-1] != valid_existing[-1]:
-        return valid_existing + [valid_scraped[-1]]
+    # 2. Cari titik temu akhir (alignment tail) jika existing sudah lebih panjang dari scraped
+    for k in range(window_size, 4, -1):
+        sample = valid_existing[-k:]
+        for i in range(len(valid_scraped) - k + 1):
+            if valid_scraped[i:i+k] == sample:
+                newer = valid_scraped[i+k:]
+                return valid_existing + newer
 
+    # Fallback: jika scraped memuat overlap parsial
+    for k in range(min(len(valid_existing), 10), 2, -1):
+        sample = valid_existing[-k:]
+        for i in range(len(valid_scraped) - k + 1):
+            if valid_scraped[i:i+k] == sample:
+                return valid_existing + valid_scraped[i+k:]
+
+    # Fallback umum: jika scraped lebih lengkap, gunakan scraped
+    if len(valid_scraped) > len(valid_existing):
+        return valid_scraped
     return valid_existing
 
 def sync_market_data(db, market_id, data, current_order):
@@ -298,7 +327,7 @@ def sync_market_data(db, market_id, data, current_order):
                         **tuning_info
                     }
                     db.collection('tuning_logs').add(stringify_keys(log_payload))
-                    print(f"🎯 [SMART TUNE] {market_id}: AI={tuning_info.get('status_ai')} | BBFS={tuning_info.get('status_bbfs')} (Result: {tuning_info.get('actual_result')} | Total: {len(merged_history)} draws)")
+                    print(f"[SMART TUNE] {market_id}: AI={tuning_info.get('status_ai')} | BBFS={tuning_info.get('status_bbfs')} (Result: {tuning_info.get('actual_result')} | Total: {len(merged_history)} draws)")
 
             if tuning_info.get('next_prediction'):
                 doc_payload['next_prediction'] = tuning_info['next_prediction']
@@ -335,7 +364,7 @@ def sync_market_data(db, market_id, data, current_order):
 
             clean_doc = stringify_keys(doc_payload)
             db.collection('markets').document(market_id).set(clean_doc, merge=True)
-            print(f"OK (Saved to Firebase): {market_id}")
+            print(f"OK (Saved to Firebase): {market_id} ({len(existing_history)} -> {len(merged_history)} draws)")
             return True
         except Exception as err:
             import traceback
