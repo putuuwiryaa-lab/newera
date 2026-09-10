@@ -174,8 +174,19 @@ def init_firebase():
     print("PERINGATAN: Kredensial Firebase tidak ditemukan. Berjalan dalam mode DRY-RUN (tidak menyimpan ke DB).")
     return None
 
-def scrape_market(url):
-    """Scrape data pengeluaran dari server paito standar."""
+def get_market_days_schema(market_id=""):
+    """Mengembalikan pola urutan hari per baris mingguan untuk pasaran tertentu."""
+    mid = market_id.lower()
+    if 'sgp' in mid or 'singapore' in mid:
+        return ["Senin", "Rabu", "Kamis", "Sabtu", "Minggu"]
+    elif 'pcso' in mid:
+        return ["Senin", "Selasa", "Rabu", "Kamis", "Jumat", "Sabtu"]
+    else:
+        # Standar pasaran harian 7 hari (HK, Sydney, Cambodia, US pools, dll)
+        return ["Senin", "Selasa", "Rabu", "Kamis", "Jumat", "Sabtu", "Minggu"]
+
+def scrape_market(url, market_id=""):
+    """Scrape data pengeluaran dan hari dari server paito standar."""
     try:
         res = requests.get(
             BASE + url,
@@ -185,29 +196,46 @@ def scrape_market(url):
         )
         html = res.text
 
-        start_idx = html.find('Tema Terang')
-        end_idx = html.find('RESET')
-
-        if start_idx == -1 or end_idx == -1:
-            return ''
-
-        section = html[start_idx:end_idx]
-        digits = re.findall(r'class="paito-digit">(\d)</span>', section)
+        soup = BeautifulSoup(html, 'html.parser')
+        container = soup.find(class_='paito-text-container')
+        days_schema = get_market_days_schema(market_id)
 
         results = []
-        for i in range(0, len(digits) - 3, 4):
-            results.append(digits[i] + digits[i+1] + digits[i+2] + digits[i+3])
+        days = []
 
-        return ' '.join(results)
+        if container:
+            lines = container.find_all(class_='paito-line')
+            for line in lines:
+                items = line.find_all(class_='paito-row-item')
+                for col_idx, item in enumerate(items):
+                    val = item.get_text().strip()
+                    # Hanya ambil jika digit 4 angka valid (abaikan 'xxxx' untuk putaran belum buka)
+                    if re.fullmatch(r'\d{4}', val):
+                        results.append(val)
+                        day_name = days_schema[col_idx % len(days_schema)]
+                        days.append(day_name)
+        else:
+            # Fallback jika struktur container tidak ditemukan
+            start_idx = html.find('Tema Terang')
+            end_idx = html.find('RESET')
+            if start_idx != -1 and end_idx != -1:
+                section = html[start_idx:end_idx]
+                digits = re.findall(r'class="paito-digit">(\d)</span>', section)
+                for i in range(0, len(digits) - 3, 4):
+                    d4 = digits[i] + digits[i+1] + digits[i+2] + digits[i+3]
+                    results.append(d4)
+                    days.append(days_schema[(len(results) - 1) % len(days_schema)])
+
+        return ' '.join(results), ' '.join(days)
     except Exception as e:
         print(f"Error scraping {url}: {e}")
-        return ''
+        return '', ''
 
-def scrape_sejahtera_market(url, existing_history_str=""):
-    """Scrape pasaran dari Sejahtera (sejahteramarah.com) secara incremental atau full."""
-    days = "Senin|Selasa|Rabu|Kamis|Jumat|Sabtu|Minggu"
+def scrape_sejahtera_market(url, existing_history_str="", existing_days_str=""):
+    """Scrape pasaran dari Sejahtera (sejahteramarah.com) secara incremental atau full dengan hari."""
+    days_pattern = "Senin|Selasa|Rabu|Kamis|Jumat|Sabtu|Minggu"
     date_pat = r"\d{1,2}/\d{1,2}/\d{4}"
-    pattern = rf"(?:{days})\s+({date_pat})\s+(\d)\s+(\d)\s+(\d)\s+(\d)"
+    pattern = rf"({days_pattern})\s+({date_pat})\s+(\d)\s+(\d)\s+(\d)\s+(\d)"
     fallback = rf"({date_pat})\s+(\d)\s+(\d)\s+(\d)\s+(\d)"
 
     headers = {
@@ -223,6 +251,7 @@ def scrape_sejahtera_market(url, existing_history_str=""):
     # Jika sudah ada existing_history, scrape 3 halaman terdepan saja untuk update harian
     pages_to_fetch = 3 if existing_history_str else 35
     all_draws = []
+    all_days = []
     seen_dates = set()
 
     for page in range(1, pages_to_fetch + 1):
@@ -235,29 +264,38 @@ def scrape_sejahtera_market(url, existing_history_str=""):
             text = re.sub(r"\s+", " ", soup.get_text(" ", strip=True))
 
             matches = re.findall(pattern, text, flags=re.IGNORECASE)
-            if not matches:
-                matches = re.findall(fallback, text, flags=re.IGNORECASE)
-            if not matches:
-                break
-
-            for date_str, d1, d2, d3, d4 in matches:
-                if date_str not in seen_dates:
-                    seen_dates.add(date_str)
-                    all_draws.append(d1 + d2 + d3 + d4)
+            if matches:
+                for day_str, date_str, d1, d2, d3, d4 in matches:
+                    if date_str not in seen_dates:
+                        seen_dates.add(date_str)
+                        all_draws.append(d1 + d2 + d3 + d4)
+                        all_days.append(day_str.capitalize())
+            else:
+                fallback_matches = re.findall(fallback, text, flags=re.IGNORECASE)
+                if not fallback_matches:
+                    break
+                for date_str, d1, d2, d3, d4 in fallback_matches:
+                    if date_str not in seen_dates:
+                        seen_dates.add(date_str)
+                        all_draws.append(d1 + d2 + d3 + d4)
+                        all_days.append("Senin")
         except Exception as e:
             print(f"Error scraping Sejahtera page {page}: {e}")
             break
 
-    new_reversed = list(reversed(all_draws))
+    new_draws_reversed = list(reversed(all_draws))
+    new_days_reversed = list(reversed(all_days))
+
     if not existing_history_str:
-        return " ".join(new_reversed)
+        return " ".join(new_draws_reversed), " ".join(new_days_reversed)
 
-    existing = [x for x in existing_history_str.strip().split() if len(x) == 4 and x.isdigit()]
-    if not existing:
-        return " ".join(new_reversed)
+    existing_draws = [x for x in existing_history_str.strip().split() if len(x) == 4 and x.isdigit()]
+    existing_days = existing_days_str.strip().split() if existing_days_str else []
 
-    merged = merge_histories(existing, new_reversed)
-    return " ".join(merged)
+    merged_draws, merged_days = merge_histories_with_days(
+        existing_draws, existing_days, new_draws_reversed, new_days_reversed
+    )
+    return " ".join(merged_draws), " ".join(merged_days)
 
 def scrape_rajapaito_market(url):
     """Scrape data pengeluaran dari server Rajapaito secara penuh (tanpa limit pemotongan)."""
@@ -302,23 +340,34 @@ def scrape_rajapaito_market(url):
         print(f"Error scraping Rajapaito {url}: {e}")
         return ""
 
-def merge_histories(existing_draws, scraped_draws):
+def merge_histories_with_days(existing_draws, existing_days, scraped_draws, scraped_days, days_schema=None):
     """
-    Menggabungkan riwayat yang sudah ada di database dengan hasil scrap secara dua arah (bidirectional):
-    1. Melakukan backfill riwayat lama (jika server sumber memiliki arsip putaran lebih panjang > 500).
-    2. Menambahkan putaran terbaru (fresh draw) di akhir barisan secara akumulatif.
-    3. Mencegah duplikasi data dengan pencocokan window sub-sequence.
+    Menggabungkan riwayat angka dan hari secara dua arah (bidirectional)
+    dengan sinkronisasi 1-to-1 yang presisi untuk paito.
     """
+    if days_schema is None:
+        days_schema = ["Senin", "Selasa", "Rabu", "Kamis", "Jumat", "Sabtu", "Minggu"]
+
     valid_existing = [d for d in existing_draws if len(d) == 4 and d.isdigit()]
     valid_scraped = [d for d in scraped_draws if len(d) == 4 and d.isdigit()]
 
-    if not valid_existing:
-        return valid_scraped
-    if not valid_scraped:
-        return valid_existing
+    # Pastikan existing_days selaras panjangnya dengan valid_existing
+    aligned_existing_days = list(existing_days)
+    while len(aligned_existing_days) < len(valid_existing):
+        idx = len(aligned_existing_days)
+        aligned_existing_days.append(days_schema[idx % len(days_schema)])
 
-    # 1. Cari titik temu awal (alignment start) valid_existing di dalam valid_scraped
-    # Ini memungkinkan backfill data historis lama jika scraped punya arsip sebelum existing[0]
+    aligned_scraped_days = list(scraped_days)
+    while len(aligned_scraped_days) < len(valid_scraped):
+        idx = len(aligned_scraped_days)
+        aligned_scraped_days.append(days_schema[idx % len(days_schema)])
+
+    if not valid_existing:
+        return valid_scraped, aligned_scraped_days
+    if not valid_scraped:
+        return valid_existing, aligned_existing_days
+
+    # 1. Cari titik temu awal (alignment start)
     window_size = min(len(valid_existing), 20)
     found_start_idx = -1
     for k in range(window_size, 4, -1):
@@ -331,42 +380,55 @@ def merge_histories(existing_draws, scraped_draws):
             break
 
     if found_start_idx != -1:
-        older = valid_scraped[:found_start_idx]
-        combined = older + valid_existing
-        # Cek apakah scraped memiliki putaran baru di bagian ekor (setelah last draw)
-        last_known = combined[-1]
+        older_draws = valid_scraped[:found_start_idx]
+        older_days = aligned_scraped_days[:found_start_idx]
+
+        combined_draws = older_draws + valid_existing
+        combined_days = older_days + aligned_existing_days
+
+        last_known = combined_draws[-1]
         if last_known in valid_scraped:
             last_idx = len(valid_scraped) - 1 - valid_scraped[::-1].index(last_known)
-            newer = valid_scraped[last_idx + 1:]
-            combined = combined + newer
-        return combined
+            newer_draws = valid_scraped[last_idx + 1:]
+            newer_days = aligned_scraped_days[last_idx + 1:]
+            combined_draws = combined_draws + newer_draws
+            combined_days = combined_days + newer_days
+        return combined_draws, combined_days
 
-    # 2. Cari titik temu akhir (alignment tail) jika existing sudah lebih panjang dari scraped
+    # 2. Cari titik temu akhir (alignment tail)
     for k in range(window_size, 4, -1):
         sample = valid_existing[-k:]
         for i in range(len(valid_scraped) - k + 1):
             if valid_scraped[i:i+k] == sample:
-                newer = valid_scraped[i+k:]
-                return valid_existing + newer
+                newer_draws = valid_scraped[i+k:]
+                newer_days = aligned_scraped_days[i+k:]
+                return valid_existing + newer_draws, aligned_existing_days + newer_days
 
     # Fallback: jika scraped memuat overlap parsial
     for k in range(min(len(valid_existing), 10), 2, -1):
         sample = valid_existing[-k:]
         for i in range(len(valid_scraped) - k + 1):
             if valid_scraped[i:i+k] == sample:
-                return valid_existing + valid_scraped[i+k:]
+                return valid_existing + valid_scraped[i+k:], aligned_existing_days + aligned_scraped_days[i+k:]
 
-    # Fallback umum: jika scraped lebih lengkap, gunakan scraped
+    # Fallback umum: jika scraped lebih lengkap
     if len(valid_scraped) > len(valid_existing):
-        return valid_scraped
-    return valid_existing
+        return valid_scraped, aligned_scraped_days
+    return valid_existing, aligned_existing_days
 
-def sync_market_data(db, market_id, data, current_order):
+def merge_histories(existing_draws, scraped_draws):
+    """Fungsi pembungkus kompatibilitas backward lama."""
+    draws, _ = merge_histories_with_days(existing_draws, [], scraped_draws, [])
+    return draws
+
+def sync_market_data(db, market_id, data, current_order, days_data=""):
     """Fungsi pembantu sinkronisasi, diffing, auto-tuning, dan penyimpanan akumulatif ke Firestore."""
+    days_schema = get_market_days_schema(market_id)
     doc_payload = {
         'id': market_id,
         'name': market_id,
         'history_data': data,
+        'history_days': days_data,
         'order': current_order,
         'updated_at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
     }
@@ -376,11 +438,18 @@ def sync_market_data(db, market_id, data, current_order):
             existing_doc = db.collection('markets').document(market_id).get()
             existing_data = existing_doc.to_dict() if existing_doc.exists else {}
             existing_history = [x for x in existing_data.get('history_data', '').split() if len(x) == 4 and x.isdigit()]
-            scraped_history = [x for x in data.split() if len(x) == 4 and x.isdigit()]
+            existing_days = existing_data.get('history_days', '').split() if existing_data.get('history_days') else []
 
-            merged_history = merge_histories(existing_history, scraped_history)
+            scraped_history = [x for x in data.split() if len(x) == 4 and x.isdigit()]
+            scraped_days = days_data.split() if days_data else []
+
+            merged_history, merged_days = merge_histories_with_days(
+                existing_history, existing_days, scraped_history, scraped_days, days_schema
+            )
             merged_history_str = " ".join(merged_history)
+            merged_days_str = " ".join(merged_days)
             doc_payload['history_data'] = merged_history_str
+            doc_payload['history_days'] = merged_days_str
 
             is_new_draw = (
                 len(merged_history) > 0 and
@@ -436,7 +505,7 @@ def sync_market_data(db, market_id, data, current_order):
 
             clean_doc = stringify_keys(doc_payload)
             db.collection('markets').document(market_id).set(clean_doc, merge=True)
-            print(f"OK (Saved to Firebase): {market_id} ({len(existing_history)} -> {len(merged_history)} draws)")
+            print(f"OK (Saved to Firebase): {market_id} ({len(existing_history)} -> {len(merged_history)} draws with days)")
             return True
         except Exception as err:
             import traceback
@@ -444,7 +513,7 @@ def sync_market_data(db, market_id, data, current_order):
             traceback.print_exc()
             return False
     else:
-        print(f"OK (Dry-run, scraped {len(data.split())} numbers): {market_id}")
+        print(f"OK (Dry-run, scraped {len(data.split())} numbers, {len(days_data.split())} days): {market_id}")
         return True
 
 def main():
@@ -458,12 +527,12 @@ def main():
 
     # 1. Scrape Pasaran Server Standar
     for market_id, url in MARKETS.items():
-        data = scrape_market(url)
+        data, days = scrape_market(url, market_id)
         if data:
             current_order = PRIORITY_ORDER.get(market_id, next_order)
             if market_id not in PRIORITY_ORDER:
                 next_order += 1
-            if sync_market_data(db, market_id, data, current_order):
+            if sync_market_data(db, market_id, data, current_order, days):
                 success += 1
             else:
                 errors += 1
@@ -474,23 +543,26 @@ def main():
         delay = random.uniform(1.0, 2.5)
         time.sleep(delay)
 
-    # 2. Scrape Pasaran Sejahtera (Mongolia, New Mexico Day, New Mexico Eve)
+    # 2. Scrape Pasaran Sejahtera (Mongolia, New Mexico Day, New Mexico Eve, Nusantara Pools)
     for market_id, url in SEJAHTERA_MARKETS.items():
         existing_history = ""
+        existing_days = ""
         if db is not None:
             try:
                 ed = db.collection('markets').document(market_id).get()
                 if ed.exists:
-                    existing_history = ed.to_dict().get('history_data', '')
+                    d = ed.to_dict()
+                    existing_history = d.get('history_data', '')
+                    existing_days = d.get('history_days', '')
             except Exception:
                 pass
 
-        data = scrape_sejahtera_market(url, existing_history)
+        data, days = scrape_sejahtera_market(url, existing_history, existing_days)
         if data:
             current_order = PRIORITY_ORDER.get(market_id, next_order)
             if market_id not in PRIORITY_ORDER:
                 next_order += 1
-            if sync_market_data(db, market_id, data, current_order):
+            if sync_market_data(db, market_id, data, current_order, days):
                 success += 1
             else:
                 errors += 1
@@ -508,7 +580,7 @@ def main():
             current_order = PRIORITY_ORDER.get(market_id, next_order)
             if market_id not in PRIORITY_ORDER:
                 next_order += 1
-            if sync_market_data(db, market_id, data, current_order):
+            if sync_market_data(db, market_id, data, current_order, ""):
                 success += 1
             else:
                 errors += 1
