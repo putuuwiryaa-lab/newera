@@ -266,17 +266,149 @@ def compute_dedicated_bbfs(history_2d: List[Tuple[int, int]], lookback: int = 50
 
 
 def generate_smart_trim(bbfs7_digits: List[int]) -> Dict[str, List[str]]:
-    """Memilah kombinasi 2D BBFS-7 ke dalam Top 10 BOM, Medium 15, dan Cadangan."""
+    """Memilah kombinasi 2D BBFS-7 ke dalam Top 10 BOM, Medium 15, Cadangan, BOM 12, Invest 20, dan Full 42."""
     top4 = bbfs7_digits[:4]
-    top10 = [f"{a}{b}" for a in top4 for b in top4 if a != b][:10]
+    bom12 = [f"{a}{b}" for a in top4 for b in top4 if a != b]
+    top10 = bom12[:10]
     top5 = bbfs7_digits[:5]
-    all_top5 = [f"{a}{b}" for a in top5 for b in top5 if a != b]
-    medium15 = [l for l in all_top5 if l not in top10][:15]
+    invest20 = [f"{a}{b}" for a in top5 for b in top5 if a != b]
+    top10_set = set(top10)
+    medium15 = [l for l in invest20 if l not in top10_set][:15]
     top7 = bbfs7_digits[:7]
-    all_top7 = [f"{a}{b}" for a in top7 for b in top7 if a != b]
+    full42 = [f"{a}{b}" for a in top7 for b in top7 if a != b]
     used = set(top10 + medium15)
-    cadangan = [l for l in all_top7 if l not in used]
-    return {"top10": top10, "medium15": medium15, "cadangan": cadangan}
+    cadangan = [l for l in full42 if l not in used]
+    return {
+        "top10": top10,
+        "medium15": medium15,
+        "cadangan": cadangan,
+        "bom12": bom12,
+        "invest20": invest20,
+        "full42": full42
+    }
+
+
+def generate_wheeling_system(digits: List[int]) -> Dict:
+    """Wheeling System Covering Design C(7, 3, 2) dan C(7, 4, 3) untuk hemat modal 3D & 4D."""
+    unique = list(dict.fromkeys(digits))
+    d = unique[:7]
+    for i in range(10):
+        if len(d) >= 7:
+            break
+        if i not in d:
+            d.append(i)
+
+    # 1. 3D Wheel (15 Line) C(7, 3, 2)
+    WHEEL_3D = [
+        [0, 1, 2], [0, 3, 4], [0, 5, 6],
+        [1, 3, 5], [1, 4, 6], [2, 3, 6], [2, 4, 5],
+        [0, 1, 4], [0, 2, 5], [0, 3, 6],
+        [1, 2, 3], [1, 5, 6], [2, 4, 6], [3, 4, 5],
+        [0, 1, 3]
+    ]
+    wheel_3d = [f"{d[idx[0]]}{d[idx[1]]}{d[idx[2]]}" for idx in WHEEL_3D]
+    wheel_3d_full = [f"{d[i]}{d[j]}{d[k]}" for i in range(7) for j in range(i + 1, 7) for k in range(j + 1, 7)]
+
+    # 2. 4D Wheel (14 Line) C(7, 4, 3)
+    WHEEL_4D = [
+        [0, 1, 2, 3], [0, 1, 4, 5], [0, 2, 4, 6], [0, 3, 5, 6],
+        [1, 2, 5, 6], [1, 3, 4, 6], [2, 3, 4, 5], [0, 1, 2, 4],
+        [0, 1, 2, 5], [0, 1, 2, 6], [0, 1, 3, 4], [0, 1, 3, 5],
+        [0, 2, 3, 6], [0, 4, 5, 6]
+    ]
+    wheel_4d = [f"{d[idx[0]]}{d[idx[1]]}{d[idx[2]]}{d[idx[3]]}" for idx in WHEEL_4D]
+    wheel_4d_full = [
+        f"{d[i]}{d[j]}{d[k]}{d[m]}"
+        for i in range(7)
+        for j in range(i + 1, 7)
+        for k in range(j + 1, 7)
+        for m in range(k + 1, 7)
+    ]
+
+    return {
+        "wheel_3d": wheel_3d,
+        "wheel_3d_full": wheel_3d_full,
+        "wheel_4d": wheel_4d,
+        "wheel_4d_full": wheel_4d_full,
+        "guarantee_3d": "Jaminan 100% Pasangan 2D Tercover (Hemat 93% Modal)",
+        "guarantee_4d": "Jaminan 100% Triplet 3-in-4 Tercover (Hemat 96% Modal)"
+    }
+
+
+def synthesize_paito_bbfs7(history_2d: List[Tuple[int, int]], paito_pred: Dict = None) -> Dict:
+    """Mesin Sintesis BBFS-7 Paito Pro dengan Regularizer Entropi dan Isolasi 3 Kumat."""
+    if paito_pred is None:
+        paito_pred = predict_paito_macro(history_2d)
+
+    sub = history_2d[-50:] if len(history_2d) >= 50 else history_2d
+    top_biji = set(paito_pred.get("top_biji", [1, 2, 3]))
+    top_shios = set(paito_pred.get("top_shios", [1, 2, 3]))
+    prim_jalur = paito_pred.get("primary_jalur", 1)
+    prim_parity = paito_pred.get("primary_parity", "Genap-Ganjil")
+
+    pair_matrix = [[0.0] * 10 for _ in range(10)]
+    for k, e in sub:
+        pair_matrix[k][e] += 1.0
+        pair_matrix[e][k] += 0.5
+
+    single_scores = {d: 0.0 for d in range(10)}
+    n = len(sub)
+    for d in range(10):
+        mom = 0.0
+        for idx, (k, e) in enumerate(sub):
+            w = math.exp(0.06 * (idx - n + 1))
+            if k == d: mom += w * 1.2
+            if e == d: mom += w * 1.0
+        biji_compat = sum(1.2 for o in range(10) if o != d and compute_biji(d, o) in top_biji)
+        par_compat = 2.0 if ((d % 2 == 0 and prim_parity.startswith("Genap")) or (d % 2 != 0 and prim_parity.startswith("Ganjil"))) else 0.0
+        shio_compat = sum(1.0 for o in range(10) if get_shio_2026(d * 10 + o)["no"] in top_shios)
+
+        single_scores[d] = mom * 1.5 + biji_compat * 1.4 + par_compat * 1.8 + shio_compat * 1.2
+
+    best_score = -1e9
+    best_comb = list(range(7))
+    for comb in itertools.combinations(range(10), 7):
+        comb_score = sum(single_scores[d] for d in comb)
+        for i in range(7):
+            for j in range(i + 1, 7):
+                comb_score += (pair_matrix[comb[i]][comb[j]] + pair_matrix[comb[j]][comb[i]]) * 0.8
+        n_besar = sum(1 for d in comb if d >= 5)
+        n_genap = sum(1 for d in comb if d % 2 == 0)
+        pen_b = max(0.0, abs(n_besar - 3.5) - 0.5) * 4.0
+        pen_g = max(0.0, abs(n_genap - 3.5) - 0.5) * 4.0
+        total_s = comb_score - pen_b - pen_g
+        if total_s > best_score:
+            best_score = total_s
+            best_comb = comb
+
+    internal_s = {d: single_scores[d] + sum(pair_matrix[d][o] + pair_matrix[o][d] for o in best_comb if o != d) for d in best_comb}
+    ranked7 = sorted(best_comb, key=lambda d: internal_s[d], reverse=True)
+    dead_digits = [d for d in range(10) if d not in best_comb]
+
+    bom12 = [f"{a}{b}" for a in ranked7[:4] for b in ranked7[:4] if a != b]
+    invest20 = [f"{a}{b}" for a in ranked7[:5] for b in ranked7[:5] if a != b]
+    full42 = [f"{a}{b}" for a in ranked7 for b in ranked7 if a != b]
+
+    def line_score(l: str) -> float:
+        k_val, e_val = int(l[0]), int(l[1])
+        sc = 0.0
+        if compute_biji(k_val, e_val) in top_biji: sc += 4.0
+        par_str = f"{'Genap' if k_val % 2 == 0 else 'Ganjil'}-{'Genap' if e_val % 2 == 0 else 'Ganjil'}"
+        if par_str == prim_parity: sc += 3.0
+        if get_shio_2026(k_val * 10 + e_val)["no"] in top_shios: sc += 2.0
+        return sc
+
+    scored_lines = sorted(full42, key=line_score, reverse=True)
+    nuklir6 = scored_lines[:6]
+
+    return {
+        "digits": ranked7,
+        "nuklir6": nuklir6,
+        "bom12": bom12,
+        "invest20": invest20,
+        "full42": full42,
+        "dead_digits": dead_digits
+    }
 
 
 # ==============================================================================
@@ -1073,6 +1205,9 @@ def audit_and_tune(results_4d: List[str], saved_prediction: Dict = None) -> Dict
         "strike_status": strike_status
     }
 
+    next_paito_bbfs7 = synthesize_paito_bbfs7(full_history_2d, next_paito)
+    next_wheeling7 = generate_wheeling_system(next_paito_bbfs7["digits"])
+
     return {
         "actual_result": last_full,
         "actual_2d": f"{actual_k}{actual_e}",
@@ -1130,6 +1265,8 @@ def audit_and_tune(results_4d: List[str], saved_prediction: Dict = None) -> Dict
             "bbfs_tier_weights": {str(k): v for k, v in next_bbfs_weights.items()},
             "dead_digits": next_dead_digits,
             "paito": next_paito,
-            "pola_tarung": analyze_pola_tarung(full_history_2d)
+            "pola_tarung": analyze_pola_tarung(full_history_2d),
+            "paito_bbfs7": next_paito_bbfs7,
+            "wheeling7": next_wheeling7
         }
     }
