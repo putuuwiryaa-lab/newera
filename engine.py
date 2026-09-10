@@ -627,7 +627,169 @@ def predict_paito_macro(history_2d: List[Tuple[int, int]], lookback: int = 50) -
         "jalur_probabilities": {str(k): v for k, v in jalur_probs.items()},
         "overdue_shios": overdue_shios,
         "overdue_alerts": overdue_alerts,
-        "confidence_score": conf
+        "confidence_score": conf,
+        "movement": analyze_movement_patterns(history_2d)
+    }
+
+
+def analyze_movement_patterns(history_2d: List[Tuple[int, int]]) -> Dict:
+    """
+    Kalkulasi Pola Pergerakan Kinetik:
+    1. Besar/Kecil: Deteksi Zig-Zag vs Streak Reversal vs Trend Follow
+    2. Paritas: Osilasi Partikel Kepala & Ekor (Flip vs Sticky)
+    3. Jalur: Rotasi Siklis Orbit Mod 3
+    4. Biji: Langkah Selisih Modulo 10
+    5. Jejak 5 Result Terakhir
+    """
+    if len(history_2d) < 5:
+        return {}
+
+    # 1. Magnitude movement
+    vals = [k * 10 + e for k, e in history_2d[-25:]]
+    mag_states = ["Besar" if v >= 50 else "Kecil" for v in vals]
+    flips = sum(1 for i in range(1, len(mag_states)) if mag_states[i] != mag_states[i-1])
+    flip_rate = flips / (len(mag_states) - 1) if len(mag_states) > 1 else 0.5
+
+    current_streak = 1
+    last_state = mag_states[-1]
+    for i in range(len(mag_states) - 2, -1, -1):
+        if mag_states[i] == last_state:
+            current_streak += 1
+        else:
+            break
+
+    recent_5_vals = vals[-5:]
+    slope = (recent_5_vals[-1] - recent_5_vals[0]) / 4.0 if len(recent_5_vals) >= 5 else 0.0
+
+    if flip_rate >= 0.58:
+        mag_rhythm = "ZIG_ZAG"
+        mag_label = f"Osilasi Zig-Zag (Flip {int(flip_rate*100)}%)"
+        pred_mag = "Kecil" if last_state == "Besar" else "Besar"
+    elif current_streak >= 3:
+        mag_rhythm = "STREAK_REVERSAL"
+        mag_label = f"Pembalikan Jenuh (Streak {current_streak}x {last_state})"
+        pred_mag = "Kecil" if last_state == "Besar" else "Besar"
+    else:
+        mag_rhythm = "TREND_FOLLOW"
+        mag_label = f"Aliran Tren ({'+' if slope >= 0 else ''}{round(slope, 1)})"
+        pred_mag = "Besar" if slope > 0 else "Kecil"
+
+    # 2. Parity movement
+    kepalas = [k for k, e in history_2d[-20:]]
+    ekors = [e for k, e in history_2d[-20:]]
+    k_flips = sum(1 for i in range(1, len(kepalas)) if (kepalas[i] % 2) != (kepalas[i-1] % 2))
+    e_flips = sum(1 for i in range(1, len(ekors)) if (ekors[i] % 2) != (ekors[i-1] % 2))
+    k_osc = "FLIP" if (k_flips / max(1, len(kepalas) - 1)) >= 0.5 else "STICKY"
+    e_osc = "FLIP" if (e_flips / max(1, len(ekors) - 1)) >= 0.5 else "STICKY"
+
+    last_k_par = "Genap" if kepalas[-1] % 2 == 0 else "Ganjil"
+    last_e_par = "Genap" if ekors[-1] % 2 == 0 else "Ganjil"
+    next_k_par = ("Ganjil" if last_k_par == "Genap" else "Genap") if k_osc == "FLIP" else last_k_par
+    next_e_par = ("Ganjil" if last_e_par == "Genap" else "Genap") if e_osc == "FLIP" else last_e_par
+    pred_parity = f"{next_k_par}-{next_e_par}"
+
+    # 3. Jalur Orbit
+    jalurs = [get_shio_2026(k * 10 + e)["jalur"] for k, e in history_2d[-15:]]
+    delta = (jalurs[-1] - jalurs[-2]) % 3 if len(jalurs) >= 2 else 1
+    if delta == 1:
+        orbit_dir = "PUTARAN_MAJU"
+        orbit_lbl = "Putaran Maju (+1 Mod 3)"
+        pred_jalur = ((jalurs[-1] - 1 + 1) % 3) + 1
+    elif delta == 2:
+        orbit_dir = "PUTARAN_MUNDUR"
+        orbit_lbl = "Putaran Mundur (-1 Mod 3)"
+        pred_jalur = ((jalurs[-1] - 1 + 2) % 3) + 1
+    else:
+        orbit_dir = "BERTAHAN"
+        orbit_lbl = "Orbit Bertahan"
+        pred_jalur = jalurs[-1]
+
+    # 4. Biji Step Modular
+    bijis = [compute_biji(k, e) for k, e in history_2d[-15:]]
+    biji_delta = (bijis[-1] - bijis[-2]) % 10 if len(bijis) >= 2 else 1
+    pred_biji = (bijis[-1] + biji_delta) % 10
+
+    # 5. Last 5 draws
+    last_5 = []
+    for k, e in history_2d[-5:]:
+        c2d = f"{k}{e}"
+        v = k * 10 + e
+        shio_obj = get_shio_2026(v)
+        last_5.append({
+            "comb2d": c2d,
+            "kepala": k,
+            "ekor": e,
+            "magnitude": "Besar" if v >= 50 else "Kecil",
+            "parity": f"{'Genap' if k % 2 == 0 else 'Ganjil'}-{'Genap' if e % 2 == 0 else 'Ganjil'}",
+            "biji": compute_biji(k, e),
+            "jalur": shio_obj["jalur"],
+            "shio_number": shio_obj["no"],
+            "shio_name": shio_obj["name"]
+        })
+
+    return {
+        "magnitude": {
+            "rhythm": mag_rhythm,
+            "rhythm_label": mag_label,
+            "flip_rate": round(flip_rate, 3),
+            "current_streak": current_streak,
+            "current_streak_state": last_state,
+            "prediction": pred_mag
+        },
+        "parity": {
+            "kepala_oscillation": k_osc,
+            "ekor_oscillation": e_osc,
+            "primary_parity": pred_parity,
+            "trajectory_flow": f"{mag_states[-3] if len(mag_states)>=3 else ''} -> {mag_states[-2] if len(mag_states)>=2 else ''} -> {mag_states[-1]}"
+        },
+        "jalur": {
+            "orbit_direction": orbit_dir,
+            "orbit_label": orbit_lbl,
+            "predicted_jalur": pred_jalur
+        },
+        "biji": {
+            "dominant_step_delta": biji_delta,
+            "step_label": f"Langkah Δ{biji_delta:+d} mod 10",
+            "target_biji": [pred_biji, (pred_biji + 1) % 10, (pred_biji + 9) % 10]
+        },
+        "last_5_draws": last_5
+    }
+
+
+def analyze_pola_tarung(history_2d: List[Tuple[int, int]], lookback: int = 50) -> Dict:
+    """
+    Pola Tarung 2D (Kepala vs Ekor Terpisah No BB):
+    Menghitung afinitas posisional Kepala dan Ekor serta menghasilkan formasi:
+    - 3x3 BOM (9 line)
+    - 4x4 Utama (16 line)
+    - 5x5 Invest (25 line)
+    """
+    sub_hist = history_2d[-lookback:] if len(history_2d) >= lookback else history_2d
+    n = len(sub_hist)
+    k_scores = {d: 0.0 for d in range(10)}
+    e_scores = {d: 0.0 for d in range(10)}
+
+    for idx, (k, e) in enumerate(sub_hist):
+        w = math.exp(0.06 * (idx - n + 1))
+        k_scores[k] += w * 2.0
+        e_scores[e] += w * 2.0
+
+    ranked_k = sorted(range(10), key=lambda d: k_scores[d], reverse=True)
+    ranked_e = sorted(range(10), key=lambda d: e_scores[d], reverse=True)
+
+    def gen_lines(ks: List[int], es: List[int]) -> List[str]:
+        res = []
+        for k in ks:
+            for e in es:
+                res.append(f"{k}{e}")
+        return res
+
+    return {
+        "ranked_kepala": ranked_k,
+        "ranked_ekor": ranked_e,
+        "tarung_3x3": gen_lines(ranked_k[:3], ranked_e[:3]),
+        "tarung_4x4": gen_lines(ranked_k[:4], ranked_e[:4]),
+        "tarung_5x5": gen_lines(ranked_k[:5], ranked_e[:5])
     }
 
 
@@ -967,6 +1129,7 @@ def audit_and_tune(results_4d: List[str], saved_prediction: Dict = None) -> Dict
             "bbfs9": next_bbfs[9],
             "bbfs_tier_weights": {str(k): v for k, v in next_bbfs_weights.items()},
             "dead_digits": next_dead_digits,
-            "paito": next_paito
+            "paito": next_paito,
+            "pola_tarung": analyze_pola_tarung(full_history_2d)
         }
     }
