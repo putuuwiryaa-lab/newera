@@ -1,0 +1,67 @@
+name: Backfill Production Evaluation Once
+
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/backfill-production-evaluation-once.yml']
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Backfill Firestore production evaluation
+        env:
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+        run: |
+          python - <<'PY'
+          import base64
+          import json
+          import os
+          import time
+          import firebase_admin
+          from firebase_admin import credentials, firestore
+          import production_evaluator as pe
+
+          raw = os.environ['FIREBASE_SERVICE_ACCOUNT']
+          try:
+              payload = json.loads(raw)
+          except Exception:
+              payload = json.loads(base64.b64decode(raw).decode('utf-8'))
+          firebase_admin.initialize_app(credentials.Certificate(payload))
+          db = firestore.client()
+
+          ok = skipped = failed = 0
+          started = time.time()
+          for snap in db.collection('markets').stream():
+              data = snap.to_dict() or {}
+              history = [x for x in str(data.get('history_data', '')).split() if len(x) == 4 and x.isdigit()]
+              if len(history) < pe.DEFAULT_WARMUP + 1:
+                  print(f'[SKIP] {snap.id}: only {len(history)} draws')
+                  skipped += 1
+                  continue
+              t0 = time.time()
+              try:
+                  state = pe.run_production_evaluation(history)
+                  if not state:
+                      print(f'[SKIP] {snap.id}: evaluator returned empty')
+                      skipped += 1
+                      continue
+                  db.collection('markets').document(snap.id).set({'production_evaluation': state}, merge=True)
+                  print(f"[OK] {snap.id}: tested={state['tested_draws']} replay={state['replay_draws']} in {time.time()-t0:.2f}s")
+                  ok += 1
+              except Exception as exc:
+                  print(f'[ERR] {snap.id}: {exc}')
+                  failed += 1
+          print(f'BACKFILL DONE: {ok} OK, {skipped} skipped, {failed} failed, {time.time()-started:.1f}s')
+          if failed:
+              raise SystemExit(1)
+          PY
