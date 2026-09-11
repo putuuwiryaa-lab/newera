@@ -1,0 +1,49 @@
+name: Apply Production Evaluator Integration
+
+on:
+  push:
+    branches: [feat/backend-production-evaluator-final2]
+    paths: ['.github/workflows/apply-production-evaluator-integration.yml']
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/backend-production-evaluator-final2
+      - name: Patch scraper and CI
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          p = Path('scraper.py')
+          s = p.read_text()
+          if 'import production_evaluator' not in s:
+              s = s.replace('import engine\n', 'import engine\nimport production_evaluator\n', 1)
+
+          anchor = "        db.collection('markets').document(market_id).set(stringify_keys(doc_payload), merge=True)"
+          if 'production_evaluation' not in s:
+              block = '''        # Production-engine evaluation: backfill only when needed, then update one draw at a time.\n        existing_evaluation = existing_data.get('production_evaluation')\n        evaluation_state = None\n        single_new_draw = is_new_draw and len(merged_history) == len(existing_history) + 1\n        if (\n            single_new_draw\n            and production_evaluator.state_matches_history(existing_evaluation, existing_history)\n            and isinstance(existing_prediction, dict)\n        ):\n            evaluation_state = production_evaluator.update_production_evaluation(\n                existing_evaluation,\n                existing_prediction,\n                merged_history[-1],\n                len(merged_history),\n                merged_history[-1],\n            )\n            if evaluation_state:\n                print(f"[EVAL] {market_id}: incremental production evaluation +1 draw")\n        elif len(merged_history) >= production_evaluator.DEFAULT_WARMUP + 1 and not production_evaluator.state_matches_history(\n            existing_evaluation, merged_history\n        ):\n            evaluation_state = production_evaluator.run_production_evaluation(merged_history)\n            if evaluation_state:\n                print(\n                    f"[EVAL] {market_id}: backfilled {evaluation_state.get('tested_draws', 0)} "\n                    "production-engine replay draws"\n                )\n\n        if evaluation_state:\n            doc_payload['production_evaluation'] = evaluation_state\n        elif production_evaluator.state_matches_history(existing_evaluation, merged_history):\n            doc_payload['production_evaluation'] = existing_evaluation\n\n'''
+              if anchor not in s:
+                  raise SystemExit('scraper anchor not found')
+              s = s.replace(anchor, block + anchor, 1)
+          p.write_text(s)
+
+          ci = Path('.github/workflows/engine-correctness-ci.yml')
+          c = ci.read_text()
+          c = c.replace('python -m py_compile engine.py scraper.py', 'python -m py_compile engine.py scraper.py production_evaluator.py')
+          ci.write_text(c)
+          PY
+      - name: Commit integration
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add scraper.py .github/workflows/engine-correctness-ci.yml
+          git commit -m "feat(evaluation): persist backend production metrics" || true
+          git rm .github/workflows/apply-production-evaluator-integration.yml
+          git commit -m "chore: remove evaluator integration helper"
+          git push origin HEAD:feat/backend-production-evaluator-final2
