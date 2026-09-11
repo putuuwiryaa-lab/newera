@@ -12,6 +12,7 @@ from bs4 import BeautifulSoup
 import firebase_admin
 from firebase_admin import credentials, firestore
 import engine
+import production_evaluator
 
 if hasattr(sys.stdout, 'reconfigure'):
     try:
@@ -539,6 +540,39 @@ def sync_market_data(db, market_id, data, current_order, days_data=""):
             if initial_tune and initial_tune.get('next_prediction'):
                 doc_payload['next_prediction'] = initial_tune['next_prediction']
                 doc_payload['last_audit'] = firestore.DELETE_FIELD
+
+        # Production-engine evaluation: backfill only when needed, then update one draw at a time.
+        existing_evaluation = existing_data.get('production_evaluation')
+        evaluation_state = None
+        single_new_draw = is_new_draw and len(merged_history) == len(existing_history) + 1
+        if (
+            single_new_draw
+            and production_evaluator.state_matches_history(existing_evaluation, existing_history)
+            and isinstance(existing_prediction, dict)
+        ):
+            evaluation_state = production_evaluator.update_production_evaluation(
+                existing_evaluation,
+                existing_prediction,
+                merged_history[-1],
+                len(merged_history),
+                merged_history[-1],
+            )
+            if evaluation_state:
+                print(f"[EVAL] {market_id}: incremental production evaluation +1 draw")
+        elif len(merged_history) >= production_evaluator.DEFAULT_WARMUP + 1 and not production_evaluator.state_matches_history(
+            existing_evaluation, merged_history
+        ):
+            evaluation_state = production_evaluator.run_production_evaluation(merged_history)
+            if evaluation_state:
+                print(
+                    f"[EVAL] {market_id}: backfilled {evaluation_state.get('tested_draws', 0)} "
+                    "production-engine replay draws"
+                )
+
+        if evaluation_state:
+            doc_payload['production_evaluation'] = evaluation_state
+        elif production_evaluator.state_matches_history(existing_evaluation, merged_history):
+            doc_payload['production_evaluation'] = existing_evaluation
 
         db.collection('markets').document(market_id).set(stringify_keys(doc_payload), merge=True)
         print(f"OK (Saved to Firebase): {market_id} ({len(existing_history)} -> {len(merged_history)} draws with days)")
