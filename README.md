@@ -1,54 +1,86 @@
-# NewEra - Automated Market Data Scraper & Sync
+# NewEra Backend
 
-Skrip scraper otomatis untuk mengumpulkan data pengeluaran angka historis dari 58 pasaran dan menyinkronkannya secara berkala ke **Google Cloud Firestore (Firebase)** menggunakan **GitHub Actions**.
+Backend Python untuk scraping history market, menjaga chronology data, menjalankan engine prediksi, dan menyinkronkan state production ke Google Cloud Firestore.
 
----
+## Alur utama
 
-## 🚀 Fitur Utama
+```text
+Sumber market
+  -> scraper.py
+  -> merge/validasi history + history_days
+  -> engine.py
+  -> next_prediction / last_audit
+  -> Firestore collection: markets
+  -> newera-web
+```
 
-- **Cakupan 58 Pasaran**: Mengambil data lengkap (Singapore, Hongkong, Sydney, Cambodia, Bullseye, dll.).
-- **Kapasitas Data**: Mengambil hingga **500 data result terakhir** per pasaran.
-- **Eksekusi Otomatis**: Berjalan otomatis setiap 3 jam menggunakan GitHub Actions (`cron: '0 */3 * * *'`).
-- **Manual Trigger**: Dilengkapi `workflow_dispatch` sehingga scraping dapat dipicu manual kapan saja dari tab Actions GitHub.
-- **Penyimpanan Firebase Firestore**: Data tersimpan terstruktur di koleksi `markets`.
-- **Aman & Terisolasi**: Kredensial service account dilindungi melalui GitHub Secrets dan `.gitignore`.
+Sumber scraper saat ini dibagi menjadi tiga kelompok: market standar, Sejahtera, dan Rajapaito. Nilai 4D yang sama secara berurutan tetap dianggap draw yang sah dan tidak didedup berdasarkan nilainya.
 
----
+## Jadwal
 
-## 📁 Struktur Dokumen Firestore (`markets`)
+Workflow `.github/workflows/scraper.yml` berjalan otomatis setiap **12 jam** (`0 */12 * * *`) dan juga mendukung `workflow_dispatch` untuk trigger manual.
 
-Setiap pasaran disimpan sebagai dokumen di koleksi `markets`:
+Workflow correctness terpisah menjalankan compile check dan regression tests untuk branch perbaikan serta `main`.
+
+## Firestore `markets`
+
+Dokumen market menggunakan field utama berikut:
+
 ```json
 {
-  "id": "SINGAPORE",
-  "name": "SINGAPORE",
-  "history_data": "8713 1564 3216 ... (500 angka terakhir)",
-  "order": 6,
-  "updated_at": "2026-09-07T17:35:00Z"
+  "id": "SGP | Singapore",
+  "name": "SGP | Singapore",
+  "history_data": "1234 5678 9012",
+  "history_days": "Senin Rabu Kamis",
+  "order": 1,
+  "updated_at": "2026-09-11T00:00:00Z",
+  "next_prediction": {
+    "engine_version": "2026.09.11-v2",
+    "basis_draw_count": 3,
+    "basis_last_draw": "9012"
+  },
+  "last_audit": {}
 }
 ```
 
----
+`history_data` dan `history_days` dijaga tetap sejajar. Pada area overlap, hari valid dari source scrape terbaru diprioritaskan. Untuk source yang hanya menyediakan tanggal, weekday dihitung dari tanggal tersebut. Bila source tidak menyediakan hari valid, metadata existing dipertahankan.
 
-## ⚙️ Konfigurasi GitHub Actions
+## Prediction state
 
-1. Buka repositori di GitHub: **Settings** > **Secrets and variables** > **Actions**.
-2. Buat secret baru:
-   - **Name**: `FIREBASE_SERVICE_ACCOUNT`
-   - **Secret**: Tempelkan isi file JSON Private Key Service Account Firebase Anda.
-3. Alur kerja akan otomatis aktif dan berjalan setiap 3 jam.
+`next_prediction` adalah state forward production yang akan diaudit ketika draw berikutnya datang. State memiliki metadata:
 
----
+- `engine_version`
+- `basis_draw_count`
+- `basis_last_draw`
 
-## 💻 Menjalankan Secara Lokal
+State legacy, state dari engine versi lama, atau state yang basis history-nya tidak cocok akan direbuild tanpa membuat audit production palsu. Initial import juga diperlakukan sebagai warm-start, bukan sebagai kemenangan/kekalahan historis.
 
-1. Pasang dependensi:
-   ```bash
-   pip install -r requirements.txt
-   ```
-2. Pastikan file `firebase-key.json` tersedia di direktori kerja (file ini sudah diabaikan oleh `.gitignore`).
-3. Jalankan scraper:
-   ```bash
-   python scraper.py
-   ```
-   *(Jika file kredensial tidak ditemukan, skrip akan otomatis beralih ke mode dry-run).*
+Jika history sumber dikoreksi tanpa menambah draw baru, prediction state dibangun ulang dan `last_audit` lama dihapus karena tidak lagi merepresentasikan basis data yang sama.
+
+## History merge
+
+Merge chronology menggunakan sequence alignment, bukan pencarian satu nilai 4D. Exact alignment diprioritaskan bila bukti overlap setara. Fuzzy alignment hanya diterima untuk koreksi kecil dengan anchor yang kuat. Jika tidak ada alignment yang cukup meyakinkan, history existing dipertahankan daripada ditimpa secara spekulatif.
+
+## Firebase credential
+
+GitHub Actions membaca service account dari secret:
+
+```text
+FIREBASE_SERVICE_ACCOUNT
+```
+
+Untuk lokal, `firebase-key.json` atau `serviceAccountKey.json` dapat digunakan. Tanpa credential, scraper berjalan dalam mode dry-run.
+
+## Menjalankan lokal
+
+```bash
+pip install -r requirements.txt
+python scraper.py
+```
+
+Menjalankan regression tests:
+
+```bash
+python -m py_compile engine.py scraper.py
+python -m unittest discover -s tests -v
+```
