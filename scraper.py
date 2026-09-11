@@ -334,7 +334,13 @@ def _best_sequence_alignment(existing, scraped, min_overlap=3):
             if best_fuzzy is None or candidate[:2] > best_fuzzy[:2]:
                 best_fuzzy = candidate
 
-    if best_exact is not None:
+    exact_overlap = best_exact[0] if best_exact is not None else -1
+    fuzzy_overlap = best_fuzzy[1] if best_fuzzy is not None else -1
+
+    # Pilih alignment dengan bukti chronology terluas. Exact menang saat coverage
+    # setara, tetapi exact tail pendek tidak boleh menutupi fuzzy alignment panjang
+    # yang hanya berbeda pada koreksi historis kecil.
+    if best_exact is not None and exact_overlap >= fuzzy_overlap:
         return best_exact
     if best_fuzzy is not None:
         _, overlap, offset, mode = best_fuzzy
