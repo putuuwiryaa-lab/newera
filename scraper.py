@@ -7,6 +7,7 @@ import random
 import json
 import base64
 import urllib3
+from datetime import datetime
 from bs4 import BeautifulSoup
 import firebase_admin
 from firebase_admin import credentials, firestore
@@ -167,6 +168,22 @@ def init_firebase():
     return None
 
 
+DAY_NAMES_ID = ("Senin", "Selasa", "Rabu", "Kamis", "Jumat", "Sabtu", "Minggu")
+
+
+def _weekday_from_ddmmyyyy(date_str):
+    """Ubah tanggal dd/mm/yyyy menjadi nama hari Indonesia."""
+    try:
+        weekday = datetime.strptime(date_str, "%d/%m/%Y").weekday()
+        return DAY_NAMES_ID[weekday]
+    except (TypeError, ValueError):
+        return ""
+
+
+def _is_valid_day(value):
+    return value in DAY_NAMES_ID
+
+
 def get_market_days_schema(market_id=""):
     mid = market_id.lower()
     if 'sgp' in mid or 'singapore' in mid:
@@ -245,7 +262,7 @@ def scrape_sejahtera_market(url, existing_history_str="", existing_days_str=""):
                     if date_str not in seen_dates:
                         seen_dates.add(date_str)
                         all_draws.append(d1 + d2 + d3 + d4)
-                        all_days.append("Senin")
+                        all_days.append(_weekday_from_ddmmyyyy(date_str))
         except Exception as e:
             print(f"Error scraping Sejahtera page {page}: {e}")
             break
@@ -359,6 +376,7 @@ def merge_histories_with_days(existing_draws, existing_days, scraped_draws, scra
     scraped = [d for d in scraped_draws if len(d) == 4 and d.isdigit()]
     e_days = _align_days(existing_days, existing, schema)
     s_days = _align_days(scraped_days, scraped, schema)
+    raw_scraped_days = list(scraped_days[:len(scraped)])
 
     if not existing:
         return scraped, s_days
@@ -382,7 +400,10 @@ def merge_histories_with_days(existing_draws, existing_days, scraped_draws, scra
                     merged.append(scraped[s_idx])
                 else:
                     merged.append(existing[e_idx])
-                merged_days.append(e_days[e_idx])
+                # Hari dari source scrape terbaru lebih otoritatif pada area overlap.
+                # Jika source tidak menyediakan hari valid (mis. Rajapaito), pertahankan existing.
+                scraped_day = raw_scraped_days[s_idx] if s_idx < len(raw_scraped_days) else ""
+                merged_days.append(scraped_day if _is_valid_day(scraped_day) else e_days[e_idx])
             elif has_existing:
                 merged.append(existing[e_idx])
                 merged_days.append(e_days[e_idx])
