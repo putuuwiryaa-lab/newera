@@ -301,27 +301,45 @@ def _align_days(days, draws, schema):
 
 
 def _best_sequence_alignment(existing, scraped, min_overlap=3):
-    """Cari offset scraped terhadap existing dengan overlap terpanjang yang 100% cocok.
+    """Cari offset chronology dengan exact match, lalu fuzzy match ber-confidence tinggi.
 
-    Berbeda dari pencarian satu nilai 4D, seluruh area overlap harus identik.
-    Karena itu angka 4D yang muncul berulang tidak bisa memilih anchor yang salah.
+    Fuzzy alignment hanya dipakai untuk menerima koreksi historis kecil pada offset yang
+    didukung banyak draw identik. Tanpa anchor kuat, caller wajib mempertahankan existing.
     """
-    best = None
-    # scraped index s dipetakan ke coordinate existing (s + offset)
+    best_exact = None
+    best_fuzzy = None
     for offset in range(-len(scraped) + 1, len(existing)):
         s_start = max(0, -offset)
         s_end = min(len(scraped), len(existing) - offset)
         overlap = s_end - s_start
         if overlap < min_overlap:
             continue
-        valid = True
-        for s in range(s_start, s_end):
-            if existing[s + offset] != scraped[s]:
-                valid = False
-                break
-        if valid and (best is None or overlap > best[0]):
-            best = (overlap, offset)
-    return best
+
+        matches = sum(
+            1 for idx in range(s_start, s_end)
+            if existing[idx + offset] == scraped[idx]
+        )
+        mismatches = overlap - matches
+        if mismatches == 0:
+            candidate = (overlap, offset, 'exact')
+            if best_exact is None or overlap > best_exact[0]:
+                best_exact = candidate
+            continue
+
+        # Koreksi kecil: minimal 5 anchor cocok dan mismatch sangat terbatas.
+        max_mismatches = max(1, overlap // 40)
+        ratio = matches / overlap
+        if overlap >= 6 and matches >= 5 and ratio >= 0.90 and mismatches <= max_mismatches:
+            candidate = (matches, overlap, offset, 'fuzzy')
+            if best_fuzzy is None or candidate[:2] > best_fuzzy[:2]:
+                best_fuzzy = candidate
+
+    if best_exact is not None:
+        return best_exact
+    if best_fuzzy is not None:
+        _, overlap, offset, mode = best_fuzzy
+        return overlap, offset, mode
+    return None
 
 
 def merge_histories_with_days(existing_draws, existing_days, scraped_draws, scraped_days, days_schema=None):
@@ -343,25 +361,32 @@ def merge_histories_with_days(existing_draws, existing_days, scraped_draws, scra
 
     alignment = _best_sequence_alignment(existing, scraped, min_overlap=3)
     if alignment:
-        _, offset = alignment
+        _, offset, mode = alignment
         start = min(0, offset)
         end = max(len(existing), offset + len(scraped))
         merged, merged_days = [], []
         for coord in range(start, end):
             e_idx = coord
             s_idx = coord - offset
-            if 0 <= e_idx < len(existing):
+            has_existing = 0 <= e_idx < len(existing)
+            has_scraped = 0 <= s_idx < len(scraped)
+            if has_existing and has_scraped:
+                # Pada fuzzy alignment, perbedaan kecil dianggap koreksi dari source terbaru.
+                if mode == 'fuzzy' and existing[e_idx] != scraped[s_idx]:
+                    merged.append(scraped[s_idx])
+                else:
+                    merged.append(existing[e_idx])
+                merged_days.append(e_days[e_idx])
+            elif has_existing:
                 merged.append(existing[e_idx])
                 merged_days.append(e_days[e_idx])
-            elif 0 <= s_idx < len(scraped):
+            elif has_scraped:
                 merged.append(scraped[s_idx])
                 merged_days.append(s_days[s_idx])
         return merged, merged_days
 
-    # Tidak ada alignment sequence yang aman. Jangan menyambung dua stream secara
-    # spekulatif; pilih dataset yang lebih lengkap sebagai fallback konservatif.
-    if len(scraped) > len(existing):
-        return scraped, s_days
+    # Tidak ada anchor sequence yang cukup kuat. Mempertahankan existing lebih aman
+    # daripada mengganti seluruh chronology hanya karena scraped kebetulan lebih panjang.
     return existing, e_days
 
 
