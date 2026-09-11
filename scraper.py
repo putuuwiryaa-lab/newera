@@ -386,9 +386,17 @@ def sync_market_data(db, market_id, data, current_order, days_data=""):
 
         # Length detects a legitimate duplicate-valued new draw (e.g. ...1234,1234).
         is_new_draw = len(merged_history) > len(existing_history)
-        if not is_new_draw and merged_history != existing_history:
-            # Data correction/re-alignment: persist data, but do not audit a fake new period.
-            print(f"[MERGE] {market_id}: history corrected/re-aligned without a new draw")
+        history_corrected = (not is_new_draw and merged_history != existing_history)
+        correction_prediction = None
+        if history_corrected:
+            # Correction/re-alignment is not a new period, so do not create a tuning log.
+            # Rebuild only the forward prediction from corrected history so stale state
+            # is never carried into the next real draw.
+            print(f"[MERGE] {market_id}: history corrected/re-aligned; rebuilding prediction state")
+            if len(merged_history) >= 15:
+                rebuilt_state = engine.audit_and_tune(merged_history, None)
+                if rebuilt_state:
+                    correction_prediction = rebuilt_state.get('next_prediction')
 
         tuning_info = {}
         if is_new_draw and len(merged_history) >= 15:
@@ -421,6 +429,13 @@ def sync_market_data(db, market_id, data, current_order, days_data=""):
                 'ai_tuning': tuning_info.get('ai_tuning'),
                 'bbfs_tuning': tuning_info.get('bbfs_tuning'),
             }
+        elif history_corrected:
+            if correction_prediction:
+                doc_payload['next_prediction'] = correction_prediction
+            else:
+                doc_payload['next_prediction'] = firestore.DELETE_FIELD
+            # Audit lama tidak lagi dapat dianggap cocok dengan history yang dikoreksi.
+            doc_payload['last_audit'] = firestore.DELETE_FIELD
         elif existing_data.get('next_prediction'):
             doc_payload['next_prediction'] = existing_data['next_prediction']
             if existing_data.get('last_audit'):
