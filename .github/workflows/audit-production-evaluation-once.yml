@@ -1,0 +1,115 @@
+name: Audit Production Evaluation Once
+
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/audit-production-evaluation-once.yml']
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Aggregate production evaluation
+        env:
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+        run: |
+          python - <<'PY'
+          import base64, json, os, statistics
+          import firebase_admin
+          from firebase_admin import credentials, firestore
+          import production_evaluator as pe
+
+          raw = os.environ['FIREBASE_SERVICE_ACCOUNT']
+          try:
+              payload = json.loads(raw)
+          except Exception:
+              payload = json.loads(base64.b64decode(raw).decode('utf-8'))
+          firebase_admin.initialize_app(credentials.Certificate(payload))
+          db = firestore.client()
+
+          docs = []
+          for snap in db.collection('markets').stream():
+              d = snap.to_dict() or {}
+              ev = d.get('production_evaluation')
+              if not isinstance(ev, dict):
+                  continue
+              if ev.get('evaluator_version') != pe.EVALUATOR_VERSION:
+                  continue
+              docs.append((snap.id, ev))
+
+          print(f'VALID_EVALUATIONS={len(docs)}')
+
+          def aggregate_family(key, tiers):
+              for tier in tiers:
+                  tested = hits = 0
+                  baseline_expected = 0.0
+                  lifts = []
+                  positive = negative = neutral = 0
+                  rows = []
+                  for market, ev in docs:
+                      metric = (ev.get(key) or {}).get(str(tier)) or {}
+                      n = int(metric.get('tested', 0) or 0)
+                      h = int(metric.get('hits', 0) or 0)
+                      b = float(metric.get('baseline_pct', 0) or 0) / 100.0
+                      lift = float(metric.get('lift_pp', 0) or 0)
+                      if n <= 0:
+                          continue
+                      tested += n; hits += h; baseline_expected += b*n; lifts.append(lift)
+                      positive += lift > 0.5
+                      negative += lift < -0.5
+                      neutral += -0.5 <= lift <= 0.5
+                      rows.append((lift, market, h/n*100.0, b*100.0))
+                  rate = hits/tested*100 if tested else 0
+                  baseline = baseline_expected/tested*100 if tested else 0
+                  print(f'{key.upper()}_{tier}: tested={tested} hits={hits} rate={rate:.2f}% baseline={baseline:.2f}% lift={rate-baseline:+.2f}pp markets_pos={positive} neg={negative} neutral={neutral}')
+                  if rows:
+                      rows.sort()
+                      print('  WORST3=' + ' | '.join(f'{m}:{l:+.1f}pp' for l,m,_,_ in rows[:3]))
+                      print('  BEST3=' + ' | '.join(f'{m}:{l:+.1f}pp' for l,m,_,_ in rows[-3:][::-1]))
+
+          aggregate_family('ai_stats', [3,4,5,6])
+          aggregate_family('bbfs_stats', [6,7,8,9])
+
+          for domain in ['biji','parity','magnitude','shio','jalur']:
+              tested = hits = 0
+              expected = brier_weighted = 0.0
+              positive = negative = 0
+              lifts=[]
+              for market, ev in docs:
+                  metric=(ev.get('paito_stats') or {}).get(domain) or {}
+                  n=int(metric.get('tested',0) or 0); h=int(metric.get('hits',0) or 0)
+                  if n<=0: continue
+                  b=float(metric.get('baseline_pct',0) or 0)/100.0
+                  lift=float(metric.get('lift_pp',0) or 0)
+                  br=float(metric.get('brier_score',0) or 0)
+                  tested+=n; hits+=h; expected+=b*n; brier_weighted+=br*n; lifts.append(lift)
+                  positive += lift > 0.5; negative += lift < -0.5
+              rate=hits/tested*100 if tested else 0; baseline=expected/tested*100 if tested else 0
+              brier=brier_weighted/tested if tested else 0
+              print(f'PAITO_{domain.upper()}: tested={tested} rate={rate:.2f}% baseline={baseline:.2f}% lift={rate-baseline:+.2f}pp brier={brier:.4f} markets_pos={positive} neg={negative}')
+
+          # Identify market-level tier recommendation by empirical lift, not raw hit-rate.
+          recommendations=[]
+          for market, ev in docs:
+              ai=[]; bb=[]
+              for t in [3,4,5,6]:
+                  m=(ev.get('ai_stats') or {}).get(str(t)) or {}
+                  ai.append((float(m.get('lift_pp',-999) or -999), t))
+              for t in [6,7,8,9]:
+                  m=(ev.get('bbfs_stats') or {}).get(str(t)) or {}
+                  bb.append((float(m.get('lift_pp',-999) or -999), t))
+              ai.sort(reverse=True); bb.sort(reverse=True)
+              recommendations.append((market, ai[0], bb[0]))
+          print('MARKET_BEST_LIFT_TIERS:')
+          for market, (al,at), (bl,bt) in sorted(recommendations):
+              print(f'  {market}: AI-{at} {al:+.2f}pp | BBFS-{bt} {bl:+.2f}pp')
+          PY
