@@ -1,7 +1,55 @@
 import unittest
+from unittest.mock import patch
 
 import engine
 import scraper
+
+
+class _FakeSnapshot:
+    def __init__(self, data):
+        self.exists = True
+        self._data = data
+
+    def to_dict(self):
+        return self._data
+
+
+class _FakeDocument:
+    def __init__(self, data=None):
+        self._data = data or {}
+        self.saved = None
+
+    def get(self):
+        return _FakeSnapshot(self._data)
+
+    def set(self, payload, merge=False):
+        self.saved = (payload, merge)
+
+
+class _FakeCollection:
+    def __init__(self, document):
+        self._document = document
+        self.added = []
+
+    def document(self, _doc_id):
+        return self._document
+
+    def add(self, payload):
+        self.added.append(payload)
+
+
+class _FakeDB:
+    def __init__(self, market_data):
+        self.market_document = _FakeDocument(market_data)
+        self.markets = _FakeCollection(self.market_document)
+        self.tuning_logs = _FakeCollection(_FakeDocument())
+
+    def collection(self, name):
+        if name == 'markets':
+            return self.markets
+        if name == 'tuning_logs':
+            return self.tuning_logs
+        raise KeyError(name)
 
 
 class EngineCorrectnessTests(unittest.TestCase):
@@ -56,6 +104,44 @@ class EngineCorrectnessTests(unittest.TestCase):
         scraped = ["2222", "1234", "1234", "9999"]
         merged, _ = scraper.merge_histories_with_days(existing, [], scraped, [])
         self.assertEqual(merged, ["1111", "2222", "1234", "1234", "9999"])
+
+    def test_history_correction_rebuilds_forward_state_without_fake_audit(self):
+        existing = [f"{i:04d}" for i in range(15)]
+        corrected = existing.copy()
+        corrected[7] = "7777"
+        stale_prediction = {"ai4": [0, 1, 2, 3], "bbfs7": [0, 1, 2, 3, 4, 5, 6]}
+        db = _FakeDB({
+            "history_data": " ".join(existing),
+            "history_days": " ".join(["Senin"] * len(existing)),
+            "next_prediction": stale_prediction,
+            "last_audit": {"status_ai": "HIT"},
+        })
+        rebuilt = {"ai4": [4, 5, 6, 7], "bbfs7": [1, 2, 3, 4, 5, 6, 7]}
+
+        with patch.object(
+            scraper,
+            "merge_histories_with_days",
+            return_value=(corrected, ["Senin"] * len(corrected)),
+        ), patch.object(
+            scraper.engine,
+            "audit_and_tune",
+            return_value={"next_prediction": rebuilt},
+        ) as tune:
+            ok = scraper.sync_market_data(
+                db,
+                "TEST",
+                " ".join(corrected),
+                1,
+                " ".join(["Senin"] * len(corrected)),
+            )
+
+        self.assertTrue(ok)
+        tune.assert_called_once_with(corrected, None)
+        self.assertEqual(db.tuning_logs.added, [])
+        payload, merge = db.market_document.saved
+        self.assertTrue(merge)
+        self.assertEqual(payload["next_prediction"], rebuilt)
+        self.assertIs(payload["last_audit"], scraper.firestore.DELETE_FIELD)
 
 
 if __name__ == "__main__":
