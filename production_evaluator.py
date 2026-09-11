@@ -75,8 +75,8 @@ def _brier(probs: Dict, actual, classes) -> float:
     return total
 
 
-def _new_accumulator() -> Dict:
-    return {
+def _new_accumulator(include_live_only: bool = True) -> Dict:
+    acc = {
         "tested": 0,
         "twins": 0,
         "replay_draws": 0,
@@ -100,18 +100,32 @@ def _new_accumulator() -> Dict:
             "baseline_sum": 0.0,
         },
     }
+    if include_live_only:
+        acc["live_only"] = _new_accumulator(False)
+    return acc
 
 
 def _accumulate(acc: Dict, prediction: Dict, actual_result: str, source: str) -> None:
     if not isinstance(prediction, dict) or len(actual_result) != 4 or not actual_result.isdigit():
         return
 
+    # True prospective performance must remain separable from reconstructed replay.
+    if source == "live":
+        live_only = acc.get("live_only")
+        if not isinstance(live_only, dict):
+            live_only = _new_accumulator(False)
+            acc["live_only"] = live_only
+        _accumulate(live_only, prediction, actual_result, "isolated")
+
     k, e = int(actual_result[2]), int(actual_result[3])
     is_twin = k == e
     target = f"{k}{e}"
     acc["tested"] += 1
     acc["twins"] += int(is_twin)
-    acc["live_draws" if source == "live" else "replay_draws"] += 1
+    if source == "live":
+        acc["live_draws"] += 1
+    elif source == "replay":
+        acc["replay_draws"] += 1
 
     for sz in engine.AI_SIZES:
         digits = set(prediction.get(f"ai{sz}", []))
@@ -227,6 +241,29 @@ def _build_output(acc: Dict, basis_draw_count: int, basis_last_draw: str, replay
         "super_hits": sniper["super_hits"],
     })
 
+    live_acc = acc.get("live_only") if isinstance(acc.get("live_only"), dict) else None
+    live_tested = int(live_acc.get("tested", 0)) if live_acc else 0
+    prospective = {
+        "tested_draws": live_tested,
+        "minimum_draws": 30,
+        "ready": live_tested >= 30,
+        "twin_count": int(live_acc.get("twins", 0)) if live_acc else 0,
+        "ai_stats": {},
+        "bbfs_stats": {},
+        "paito_stats": {},
+        "trimmer_stats": {},
+        "sniper_stats": {},
+    }
+    if live_acc and live_tested > 0:
+        live_output = _build_output(live_acc, basis_draw_count, basis_last_draw, 0)
+        prospective.update({
+            "ai_stats": live_output["ai_stats"],
+            "bbfs_stats": live_output["bbfs_stats"],
+            "paito_stats": live_output["paito_stats"],
+            "trimmer_stats": live_output["trimmer_stats"],
+            "sniper_stats": live_output["sniper_stats"],
+        })
+
     return {
         "evaluator_version": EVALUATOR_VERSION,
         "engine_version": engine.ENGINE_VERSION,
@@ -243,6 +280,7 @@ def _build_output(acc: Dict, basis_draw_count: int, basis_last_draw: str, replay
         "paito_stats": paito_stats,
         "trimmer_stats": dict(acc["trimmer"]),
         "sniper_stats": sniper_metric,
+        "prospective": prospective,
         "accumulators": acc,
     }
 
