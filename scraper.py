@@ -126,6 +126,21 @@ def stringify_keys(obj):
     return obj
 
 
+def prediction_state_matches_history(prediction, history):
+    """True hanya untuk state engine aktif yang dibangun dari history saat ini."""
+    if not isinstance(prediction, dict) or not history:
+        return False
+    try:
+        basis_count = int(prediction.get('basis_draw_count', -1))
+    except (TypeError, ValueError):
+        return False
+    return (
+        prediction.get('engine_version') == engine.ENGINE_VERSION
+        and basis_count == len(history)
+        and prediction.get('basis_last_draw') == history[-1]
+    )
+
+
 def init_firebase():
     sa_env = os.environ.get("FIREBASE_SERVICE_ACCOUNT")
     if sa_env:
@@ -398,6 +413,23 @@ def sync_market_data(db, market_id, data, current_order, days_data=""):
                 if rebuilt_state:
                     correction_prediction = rebuilt_state.get('next_prediction')
 
+        existing_prediction = existing_data.get('next_prediction')
+        needs_state_migration = (
+            len(merged_history) >= 15
+            and not is_new_draw
+            and not history_corrected
+            and not prediction_state_matches_history(existing_prediction, merged_history)
+        )
+        migration_prediction = None
+        if needs_state_migration:
+            print(
+                f"[MIGRATE] {market_id}: rebuilding prediction state for "
+                f"engine {engine.ENGINE_VERSION}"
+            )
+            rebuilt_state = engine.audit_and_tune(merged_history, None)
+            if rebuilt_state:
+                migration_prediction = rebuilt_state.get('next_prediction')
+
         tuning_info = {}
         if is_new_draw and len(merged_history) >= 15:
             tuning_info = engine.audit_and_tune(merged_history, existing_data.get('next_prediction'))
@@ -436,25 +468,23 @@ def sync_market_data(db, market_id, data, current_order, days_data=""):
                 doc_payload['next_prediction'] = firestore.DELETE_FIELD
             # Audit lama tidak lagi dapat dianggap cocok dengan history yang dikoreksi.
             doc_payload['last_audit'] = firestore.DELETE_FIELD
-        elif existing_data.get('next_prediction'):
-            doc_payload['next_prediction'] = existing_data['next_prediction']
+        elif needs_state_migration:
+            if migration_prediction:
+                doc_payload['next_prediction'] = migration_prediction
+            else:
+                doc_payload['next_prediction'] = firestore.DELETE_FIELD
+            # Audit dari engine/schema lama tidak boleh ditampilkan sebagai audit engine aktif.
+            doc_payload['last_audit'] = firestore.DELETE_FIELD
+        elif existing_prediction:
+            doc_payload['next_prediction'] = existing_prediction
             if existing_data.get('last_audit'):
                 doc_payload['last_audit'] = existing_data['last_audit']
         elif len(merged_history) >= 15:
+            # Warm-start hanya membentuk state ke depan. Rekonstruksi historis bukan audit production.
             initial_tune = engine.audit_and_tune(merged_history, None)
             if initial_tune and initial_tune.get('next_prediction'):
                 doc_payload['next_prediction'] = initial_tune['next_prediction']
-                doc_payload['last_audit'] = {
-                    'status_ai': initial_tune.get('status_ai'),
-                    'status_bbfs': initial_tune.get('status_bbfs'),
-                    'actual_result': initial_tune.get('actual_result'),
-                    'actual_2d': initial_tune.get('actual_2d'),
-                    'is_twin': initial_tune.get('is_twin'),
-                    'paito_audit': initial_tune.get('paito_audit'),
-                    'previous_prediction': initial_tune.get('previous_prediction'),
-                    'ai_tuning': initial_tune.get('ai_tuning'),
-                    'bbfs_tuning': initial_tune.get('bbfs_tuning'),
-                }
+                doc_payload['last_audit'] = firestore.DELETE_FIELD
 
         db.collection('markets').document(market_id).set(stringify_keys(doc_payload), merge=True)
         print(f"OK (Saved to Firebase): {market_id} ({len(existing_history)} -> {len(merged_history)} draws with days)")

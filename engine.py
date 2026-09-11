@@ -18,6 +18,7 @@ MISTIK_LAMA = {0: 1, 1: 0, 2: 5, 3: 8, 4: 7, 5: 2, 6: 9, 7: 4, 8: 3, 9: 6}
 MISTIK_BARU = {0: 8, 1: 7, 2: 6, 3: 9, 4: 5, 5: 4, 6: 2, 7: 1, 8: 0, 9: 3}
 AI_SIZES = (3, 4, 5, 6)
 BBFS_SIZES = (6, 7, 8, 9)
+ENGINE_VERSION = "2026.09.11-v2"
 
 
 def _has_signal(scores: Dict[int, float]) -> bool:
@@ -865,6 +866,9 @@ def audit_and_tune(results_4d: List[str], saved_prediction: Dict = None) -> Dict
         "rewarded_methods": sorted(rewarded),
         "calibrated_weights": final_ai_weights[4],
         "next_prediction": {
+            "engine_version": ENGINE_VERSION,
+            "basis_draw_count": len(full_history),
+            "basis_last_draw": last_full,
             "ai3": next_ranked[3][:3],
             "ai4": next_ranked[4][:4],
             "ai5": next_ranked[5][:5],
