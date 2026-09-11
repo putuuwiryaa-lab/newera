@@ -3,7 +3,11 @@ name: Engine Correctness CI
 on:
   push:
     branches:
+      - main
       - fix/engine-correctness
+  pull_request:
+    branches:
+      - main
   workflow_dispatch:
 
 jobs:
