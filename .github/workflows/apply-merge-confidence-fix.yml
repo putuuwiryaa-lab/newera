@@ -1,0 +1,45 @@
+name: Apply Merge Confidence Fix
+
+on:
+  push:
+    branches:
+      - fix/engine-correctness
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/engine-correctness
+      - name: Harden sequence alignment and fallback
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('scraper.py')
+          s = p.read_text()
+
+          old = '''def _best_sequence_alignment(existing, scraped, min_overlap=3):\n    """Cari offset scraped terhadap existing dengan overlap terpanjang yang 100% cocok.\n\n    Berbeda dari pencarian satu nilai 4D, seluruh area overlap harus identik.\n    Karena itu angka 4D yang muncul berulang tidak bisa memilih anchor yang salah.\n    """\n    best = None\n    # scraped index s dipetakan ke coordinate existing (s + offset)\n    for offset in range(-len(scraped) + 1, len(existing)):\n        s_start = max(0, -offset)\n        s_end = min(len(scraped), len(existing) - offset)\n        overlap = s_end - s_start\n        if overlap < min_overlap:\n            continue\n        valid = True\n        for s in range(s_start, s_end):\n            if existing[s + offset] != scraped[s]:\n                valid = False\n                break\n        if valid and (best is None or overlap > best[0]):\n            best = (overlap, offset)\n    return best\n'''
+          new = '''def _best_sequence_alignment(existing, scraped, min_overlap=3):\n    """Cari offset chronology dengan exact match, lalu fuzzy match ber-confidence tinggi.\n\n    Fuzzy alignment hanya dipakai untuk menerima koreksi historis kecil pada offset yang\n    didukung banyak draw identik. Tanpa anchor kuat, caller wajib mempertahankan existing.\n    """\n    best_exact = None\n    best_fuzzy = None\n    for offset in range(-len(scraped) + 1, len(existing)):\n        s_start = max(0, -offset)\n        s_end = min(len(scraped), len(existing) - offset)\n        overlap = s_end - s_start\n        if overlap < min_overlap:\n            continue\n\n        matches = sum(\n            1 for idx in range(s_start, s_end)\n            if existing[idx + offset] == scraped[idx]\n        )\n        mismatches = overlap - matches\n        if mismatches == 0:\n            candidate = (overlap, offset, 'exact')\n            if best_exact is None or overlap > best_exact[0]:\n                best_exact = candidate\n            continue\n\n        # Koreksi kecil: minimal 5 anchor cocok dan mismatch sangat terbatas.\n        max_mismatches = max(1, overlap // 40)\n        ratio = matches / overlap\n        if overlap >= 6 and matches >= 5 and ratio >= 0.90 and mismatches <= max_mismatches:\n            candidate = (matches, overlap, offset, 'fuzzy')\n            if best_fuzzy is None or candidate[:2] > best_fuzzy[:2]:\n                best_fuzzy = candidate\n\n    if best_exact is not None:\n        return best_exact\n    if best_fuzzy is not None:\n        _, overlap, offset, mode = best_fuzzy\n        return overlap, offset, mode\n    return None\n'''
+          if old not in s:
+              raise SystemExit('alignment function target not found')
+          s = s.replace(old, new, 1)
+
+          old = '''    alignment = _best_sequence_alignment(existing, scraped, min_overlap=3)\n    if alignment:\n        _, offset = alignment\n        start = min(0, offset)\n        end = max(len(existing), offset + len(scraped))\n        merged, merged_days = [], []\n        for coord in range(start, end):\n            e_idx = coord\n            s_idx = coord - offset\n            if 0 <= e_idx < len(existing):\n                merged.append(existing[e_idx])\n                merged_days.append(e_days[e_idx])\n            elif 0 <= s_idx < len(scraped):\n                merged.append(scraped[s_idx])\n                merged_days.append(s_days[s_idx])\n        return merged, merged_days\n\n    # Tidak ada alignment sequence yang aman. Jangan menyambung dua stream secara\n    # spekulatif; pilih dataset yang lebih lengkap sebagai fallback konservatif.\n    if len(scraped) > len(existing):\n        return scraped, s_days\n    return existing, e_days\n'''
+          new = '''    alignment = _best_sequence_alignment(existing, scraped, min_overlap=3)\n    if alignment:\n        _, offset, mode = alignment\n        start = min(0, offset)\n        end = max(len(existing), offset + len(scraped))\n        merged, merged_days = [], []\n        for coord in range(start, end):\n            e_idx = coord\n            s_idx = coord - offset\n            has_existing = 0 <= e_idx < len(existing)\n            has_scraped = 0 <= s_idx < len(scraped)\n            if has_existing and has_scraped:\n                # Pada fuzzy alignment, perbedaan kecil dianggap koreksi dari source terbaru.\n                if mode == 'fuzzy' and existing[e_idx] != scraped[s_idx]:\n                    merged.append(scraped[s_idx])\n                else:\n                    merged.append(existing[e_idx])\n                merged_days.append(e_days[e_idx])\n            elif has_existing:\n                merged.append(existing[e_idx])\n                merged_days.append(e_days[e_idx])\n            elif has_scraped:\n                merged.append(scraped[s_idx])\n                merged_days.append(s_days[s_idx])\n        return merged, merged_days\n\n    # Tidak ada anchor sequence yang cukup kuat. Mempertahankan existing lebih aman\n    # daripada mengganti seluruh chronology hanya karena scraped kebetulan lebih panjang.\n    return existing, e_days\n'''
+          if old not in s:
+              raise SystemExit('merge block target not found')
+          p.write_text(s.replace(old, new, 1))
+          Path('.github/workflows/apply-merge-confidence-fix.yml').unlink()
+          PY
+      - name: Commit fix
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add scraper.py .github/workflows/apply-merge-confidence-fix.yml
+          git commit -m "fix(scraper): require confident sequence alignment before replacing history"
+          git push origin HEAD:fix/engine-correctness
