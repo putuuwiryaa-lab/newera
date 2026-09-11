@@ -399,9 +399,11 @@ def sync_market_data(db, market_id, data, current_order, days_data=""):
         doc_payload['history_data'] = " ".join(merged_history)
         doc_payload['history_days'] = " ".join(merged_days)
 
-        # Length detects a legitimate duplicate-valued new draw (e.g. ...1234,1234).
-        is_new_draw = len(merged_history) > len(existing_history)
-        history_corrected = (not is_new_draw and merged_history != existing_history)
+        # Hanya history yang sudah pernah tersimpan boleh menghasilkan event new-draw.
+        # Initial import adalah warm-start, bukan audit periode production.
+        had_prior_history = bool(existing_history)
+        is_new_draw = had_prior_history and len(merged_history) > len(existing_history)
+        history_corrected = (had_prior_history and not is_new_draw and merged_history != existing_history)
         correction_prediction = None
         if history_corrected:
             # Correction/re-alignment is not a new period, so do not create a tuning log.
