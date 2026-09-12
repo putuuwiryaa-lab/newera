@@ -12,6 +12,7 @@ import math
 from typing import Dict, Iterable, List
 
 import engine
+from state_contract import count, finite_number, prediction_matches_basis
 
 EVALUATOR_VERSION = f"{engine.ENGINE_VERSION}-prod-eval-v1"
 DEFAULT_WARMUP = 50
@@ -285,6 +286,93 @@ def _build_output(acc: Dict, basis_draw_count: int, basis_last_draw: str, replay
     }
 
 
+def evaluation_integrity_errors(state: Dict, allow_legacy_empty_live: bool = False) -> List[str]:
+    """Validate counters and their published projection before trusting live evidence."""
+    if not isinstance(state, dict) or not isinstance(state.get("accumulators"), dict):
+        return ["evaluation.accumulators.missing"]
+    errors = []
+    acc = state["accumulators"]
+
+    def validate_bucket(bucket, path, isolated=False):
+        if not isinstance(bucket, dict):
+            errors.append(path)
+            return
+        template = _new_accumulator(False)
+        if set(bucket) - (set(template) | (set() if isolated else {"live_only"})):
+            errors.append(f"{path}.schema")
+        def shape(value, expected, key):
+            if isinstance(expected, dict):
+                if not isinstance(value, dict):
+                    errors.append(key)
+                    return
+                if set(value) != set(expected):
+                    errors.append(f"{key}.schema")
+                for child, prototype in expected.items():
+                    shape(value.get(child), prototype, f"{key}.{child}")
+            elif not finite_number(value) or value < 0 or (isinstance(expected, int) and not count(value)):
+                errors.append(key)
+        before = len(errors)
+        shape({k: v for k, v in bucket.items() if k != "live_only"}, template, path)
+        if len(errors) != before:
+            return
+        n = bucket["tested"]
+        if bucket["twins"] > n or (not isolated and n != bucket["replay_draws"] + bucket["live_draws"]):
+            errors.append(f"{path}.counts")
+        if isolated and (bucket["replay_draws"] != 0 or bucket["live_draws"] != 0 or "live_only" in bucket):
+            errors.append(f"{path}.isolation")
+        for family in ("ai", "bbfs", "paito"):
+            for key, row in bucket[family].items():
+                if not isinstance(row, dict) or not count(row.get("hits")) or row["hits"] > n:
+                    errors.append(f"{path}.{family}.{key}.hits")
+                if family == "bbfs" and isinstance(row, dict) and count(row.get("hits")) and row["hits"] > n - bucket["twins"]:
+                    errors.append(f"{path}.{family}.{key}.twin")
+                if family == "paito" and (row.get("baseline_sum", 0) > n + 1e-8 or row.get("brier_sum", 0) > 2 * n + 1e-8):
+                    errors.append(f"{path}.{family}.{key}.sums")
+        if sum(bucket["trimmer"].values()) != n:
+            errors.append(f"{path}.trimmer.total")
+        sniper = bucket["sniper"]
+        if not (sniper["super_hits"] <= sniper["top_hits"] <= sniper["any_hits"] <= sniper["active_draws"] <= n
+                and sniper["top_hits"] + sniper["secondary_hits"] == sniper["any_hits"]
+                and sniper["baseline_sum"] <= sniper["active_draws"] + 1e-8):
+            errors.append(f"{path}.sniper.counts")
+
+    validate_bucket(acc, "evaluation.accumulators")
+    live = acc.get("live_only")
+    legacy_empty = allow_legacy_empty_live and live is None and acc.get("live_draws") == 0 and "prospective" not in state
+    if not legacy_empty:
+        validate_bucket(live, "evaluation.prospective", True)
+        if isinstance(live, dict) and live.get("tested") != acc.get("live_draws"):
+            errors.append("evaluation.prospective.live_count")
+    if not count(state.get("basis_draw_count")) or not count(state.get("replay_window_draws")):
+        errors.append("evaluation.basis_count")
+    if not count(state.get("unscored_draws", 0)):
+        errors.append("evaluation.unscored_draws")
+    if count(acc.get('tested')) and count(state.get('basis_draw_count')) and acc['tested'] > state['basis_draw_count']:
+        errors.append('evaluation.tested_exceeds_basis')
+    last = state.get("basis_last_draw")
+    if not isinstance(last, str) or len(last) != 4 or not last.isascii() or not last.isdigit():
+        errors.append("evaluation.basis_last_draw")
+    if errors:
+        return errors
+    if live:
+        def subset(child, parent):
+            for key, value in child.items():
+                if key in ("tested", "replay_draws", "live_draws"):
+                    continue
+                if isinstance(value, dict):
+                    subset(value, parent[key])
+                elif value > parent[key] + 1e-8:
+                    errors.append("evaluation.prospective.subset")
+        subset(live, acc)
+    expected = _build_output(acc, state["basis_draw_count"], last, state["replay_window_draws"])
+    for key in ("tested_draws", "replay_draws", "live_draws", "twin_count", "twin_rate_pct", "ai_stats", "bbfs_stats", "paito_stats", "trimmer_stats", "sniper_stats", "prospective"):
+        if key == "prospective" and legacy_empty:
+            continue
+        if state.get(key) != expected[key]:
+            errors.append(f"evaluation.{key}.projection")
+    return sorted(set(errors))
+
+
 def state_matches_history(state: Dict, history: Iterable[str]) -> bool:
     valid = _valid_results(history)
     if not valid or not isinstance(state, dict):
@@ -292,9 +380,10 @@ def state_matches_history(state: Dict, history: Iterable[str]) -> bool:
     return (
         state.get("evaluator_version") == EVALUATOR_VERSION
         and state.get("engine_version") == engine.ENGINE_VERSION
-        and int(state.get("basis_draw_count", -1)) == len(valid)
+        and count(state.get("basis_draw_count"))
+        and state["basis_draw_count"] == len(valid)
         and state.get("basis_last_draw") == valid[-1]
-        and isinstance(state.get("accumulators"), dict)
+        and not evaluation_integrity_errors(state, allow_legacy_empty_live=True)
     )
 
 
@@ -335,15 +424,49 @@ def update_production_evaluation(
         not isinstance(previous_state, dict)
         or previous_state.get("evaluator_version") != EVALUATOR_VERSION
         or previous_state.get("engine_version") != engine.ENGINE_VERSION
-        or not isinstance(previous_state.get("accumulators"), dict)
-        or not isinstance(saved_prediction, dict)
+        or evaluation_integrity_errors(previous_state, allow_legacy_empty_live=True)
+        or not prediction_matches_basis(saved_prediction, engine.ENGINE_VERSION,
+                                        previous_state.get("basis_draw_count"), previous_state.get("basis_last_draw"))
+        or not count(basis_draw_count)
+        or basis_draw_count != previous_state["basis_draw_count"] + 1
+        or not isinstance(actual_result, str)
+        or len(actual_result) != 4 or not actual_result.isascii() or not actual_result.isdigit()
+        or basis_last_draw != actual_result
     ):
         return {}
     acc = copy.deepcopy(previous_state["accumulators"])
     _accumulate(acc, saved_prediction, actual_result, "live")
-    return _build_output(
+    result = _build_output(
         acc,
         basis_draw_count,
         basis_last_draw,
         int(previous_state.get("replay_window_draws", 0)),
     )
+    result["unscored_draws"] = previous_state.get("unscored_draws", 0)
+    return result
+
+
+def advance_without_observation(previous_state, history):
+    """Keep existing replay/live evidence across missed draws; never fabricate live bets."""
+    if evaluation_integrity_errors(previous_state):
+        return {}
+    skipped = len(history) - previous_state["basis_draw_count"]
+    if skipped <= 0:
+        return {}
+    result = _build_output(copy.deepcopy(previous_state["accumulators"]), len(history), history[-1], previous_state["replay_window_draws"])
+    result["unscored_draws"] = previous_state.get("unscored_draws", 0) + skipped
+    return result
+
+
+def upgrade_empty_live_state(state):
+    """Only zero-live legacy states can gain an empty holdout without inventing evidence."""
+    if (not isinstance(state, dict) or state.get('live_draws') != 0
+            or state.get('engine_version') != engine.ENGINE_VERSION
+            or state.get('evaluator_version') != EVALUATOR_VERSION
+            or not isinstance(state.get('accumulators'), dict)
+            or 'live_only' in state['accumulators'] or 'prospective' in state
+            or evaluation_integrity_errors(state, allow_legacy_empty_live=True)):
+        return state
+    acc = copy.deepcopy(state['accumulators'])
+    acc['live_only'] = _new_accumulator(False)
+    return {**state, **_build_output(acc, state['basis_draw_count'], state['basis_last_draw'], state['replay_window_draws'])}

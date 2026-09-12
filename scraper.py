@@ -13,6 +13,8 @@ import firebase_admin
 from firebase_admin import credentials, firestore
 import engine
 import production_evaluator
+import production_health
+from state_contract import prediction_matches_basis
 
 if hasattr(sys.stdout, 'reconfigure'):
     try:
@@ -130,17 +132,7 @@ def stringify_keys(obj):
 
 def prediction_state_matches_history(prediction, history):
     """True hanya untuk state engine aktif yang dibangun dari history saat ini."""
-    if not isinstance(prediction, dict) or not history:
-        return False
-    try:
-        basis_count = int(prediction.get('basis_draw_count', -1))
-    except (TypeError, ValueError):
-        return False
-    return (
-        prediction.get('engine_version') == engine.ENGINE_VERSION
-        and basis_count == len(history)
-        and prediction.get('basis_last_draw') == history[-1]
-    )
+    return bool(history) and prediction_matches_basis(prediction, engine.ENGINE_VERSION, len(history), history[-1])
 
 
 def init_firebase():
@@ -455,8 +447,10 @@ def sync_market_data(db, market_id, data, current_order, days_data=""):
         # Hanya history yang sudah pernah tersimpan boleh menghasilkan event new-draw.
         # Initial import adalah warm-start, bukan audit periode production.
         had_prior_history = bool(existing_history)
-        is_new_draw = had_prior_history and len(merged_history) > len(existing_history)
-        history_corrected = (had_prior_history and not is_new_draw and merged_history != existing_history)
+        is_new_draw = (had_prior_history and len(merged_history) > len(existing_history)
+                       and merged_history[:len(existing_history)] == existing_history)
+        single_new_draw = is_new_draw and len(merged_history) == len(existing_history) + 1
+        history_corrected = had_prior_history and not is_new_draw and merged_history != existing_history
         correction_prediction = None
         if history_corrected:
             # Correction/re-alignment is not a new period, so do not create a tuning log.
@@ -486,7 +480,7 @@ def sync_market_data(db, market_id, data, current_order, days_data=""):
                 migration_prediction = rebuilt_state.get('next_prediction')
 
         tuning_info = {}
-        if is_new_draw and len(merged_history) >= 15:
+        if single_new_draw and prediction_state_matches_history(existing_prediction, existing_history):
             tuning_info = engine.audit_and_tune(merged_history, existing_data.get('next_prediction'))
             if tuning_info:
                 log_payload = {
@@ -530,6 +524,10 @@ def sync_market_data(db, market_id, data, current_order, days_data=""):
                 doc_payload['next_prediction'] = firestore.DELETE_FIELD
             # Audit dari engine/schema lama tidak boleh ditampilkan sebagai audit engine aktif.
             doc_payload['last_audit'] = firestore.DELETE_FIELD
+        elif is_new_draw and len(merged_history) >= 15:
+            # A skipped batch / invalid previous basis cannot create a production audit.
+            doc_payload['next_prediction'] = engine.audit_and_tune(merged_history, None)['next_prediction']
+            doc_payload['last_audit'] = firestore.DELETE_FIELD
         elif existing_prediction:
             doc_payload['next_prediction'] = existing_prediction
             if existing_data.get('last_audit'):
@@ -542,13 +540,16 @@ def sync_market_data(db, market_id, data, current_order, days_data=""):
                 doc_payload['last_audit'] = firestore.DELETE_FIELD
 
         # Production-engine evaluation: backfill only when needed, then update one draw at a time.
-        existing_evaluation = existing_data.get('production_evaluation')
+        existing_evaluation = production_evaluator.upgrade_empty_live_state(existing_data.get('production_evaluation'))
         evaluation_state = None
-        single_new_draw = is_new_draw and len(merged_history) == len(existing_history) + 1
+        blocked_reason = existing_data.get('evaluation_blocked_reason', '')
+        if history_corrected and existing_evaluation:
+            blocked_reason = 'History corrected; retained evaluator requires an audited recovery before further live observations'
         if (
             single_new_draw
+            and not blocked_reason
             and production_evaluator.state_matches_history(existing_evaluation, existing_history)
-            and isinstance(existing_prediction, dict)
+            and prediction_state_matches_history(existing_prediction, existing_history)
         ):
             evaluation_state = production_evaluator.update_production_evaluation(
                 existing_evaluation,
@@ -559,9 +560,10 @@ def sync_market_data(db, market_id, data, current_order, days_data=""):
             )
             if evaluation_state:
                 print(f"[EVAL] {market_id}: incremental production evaluation +1 draw")
-        elif len(merged_history) >= production_evaluator.DEFAULT_WARMUP + 1 and not production_evaluator.state_matches_history(
-            existing_evaluation, merged_history
-        ):
+        elif (is_new_draw and not blocked_reason
+              and production_evaluator.state_matches_history(existing_evaluation, existing_history)):
+            evaluation_state = production_evaluator.advance_without_observation(existing_evaluation, merged_history)
+        elif not existing_evaluation and len(merged_history) >= production_evaluator.DEFAULT_WARMUP + 1:
             evaluation_state = production_evaluator.run_production_evaluation(merged_history)
             if evaluation_state:
                 print(
@@ -571,9 +573,18 @@ def sync_market_data(db, market_id, data, current_order, days_data=""):
 
         if evaluation_state:
             doc_payload['production_evaluation'] = evaluation_state
-        elif production_evaluator.state_matches_history(existing_evaluation, merged_history):
+        elif existing_evaluation:
+            # Preserve prospective evidence even when stale/corrupt. Health exposes the
+            # problem; replay must not silently reset or replace observed live draws.
             doc_payload['production_evaluation'] = existing_evaluation
 
+        if blocked_reason:
+            doc_payload['evaluation_blocked_reason'] = blocked_reason
+        doc_payload['last_checked_at'] = doc_payload['updated_at']
+        doc_payload['health_error'] = ''
+        health_input = {**existing_data, **doc_payload}
+        health_input = {k: v for k, v in health_input.items() if v is not firestore.DELETE_FIELD}
+        doc_payload['production_health'] = production_health.assess_market_health(health_input)
         db.collection('markets').document(market_id).set(stringify_keys(doc_payload), merge=True)
         print(f"OK (Saved to Firebase): {market_id} ({len(existing_history)} -> {len(merged_history)} draws with days)")
         return True
@@ -581,7 +592,23 @@ def sync_market_data(db, market_id, data, current_order, days_data=""):
         import traceback
         print(f"ERR (Firebase save failed for {market_id}): {err}")
         traceback.print_exc()
+        record_health_failure(db, market_id, 'Sync failed')
         return False
+
+
+def record_health_failure(db, market_id, reason):
+    """Best effort only: a failed Firestore write is still reported in workflow logs."""
+    if db is None:
+        return
+    try:
+        ref = db.collection('markets').document(market_id)
+        snapshot = ref.get()
+        market = snapshot.to_dict() if snapshot.exists else {}
+        market['health_error'] = reason
+        health = production_health.assess_market_health(market)
+        ref.set({'health_error': reason, 'production_health': health}, merge=True)
+    except Exception as err:
+        print(f'[HEALTH] {market_id}: failed to persist ERROR: {type(err).__name__}')
 
 
 def main():
@@ -603,6 +630,7 @@ def main():
                 errors += 1
         else:
             print(f"SKIP: {market_id} (data kosong / gagal koneksi)")
+            record_health_failure(db, market_id, 'Scrape returned no data')
             errors += 1
         time.sleep(random.uniform(1.0, 2.5))
 
@@ -628,6 +656,7 @@ def main():
                 errors += 1
         else:
             print(f"SKIP: {market_id} (data kosong Sejahtera)")
+            record_health_failure(db, market_id, 'Scrape returned no data')
             errors += 1
         time.sleep(random.uniform(1.0, 2.0))
 
@@ -643,6 +672,7 @@ def main():
                 errors += 1
         else:
             print(f"SKIP: {market_id} (data kosong Rajapaito)")
+            record_health_failure(db, market_id, 'Scrape returned no data')
             errors += 1
         time.sleep(random.uniform(1.0, 2.0))
 

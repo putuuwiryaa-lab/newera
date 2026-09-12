@@ -5,6 +5,7 @@ on:
     branches:
       - main
       - fix/engine-correctness
+      - feat/engine-parity-health
   pull_request:
     branches:
       - main
@@ -20,6 +21,34 @@ jobs:
           python-version: '3.12'
           cache: pip
       - run: python -m pip install --upgrade pip
-      - run: pip install -r requirements.txt
-      - run: python -m py_compile engine.py scraper.py
+      - run: pip install -r requirements-dev.txt
+      - run: python -m compileall -q engine.py scraper.py production_evaluator.py production_health.py state_contract.py monitor_health.py scripts tests
+      - run: ruff check --select E9,F63,F7,F82 .
       - run: python -m unittest discover -s tests -v
+
+  parity:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: putuuwiryaa-lab/newera-web
+          ref: f92157c0d2e2628b82393e408567c85ab964afa9
+          path: diagnostic
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: diagnostic/package-lock.json
+      - run: npm ci
+        working-directory: diagnostic
+      - run: npm run parity -- --backend ..
+        working-directory: diagnostic
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: engine-parity-report
+          path: diagnostic/work/parity-report.json

@@ -7,6 +7,10 @@ on:
   # Memungkinkan trigger manual langsung dari tab "Actions" di GitHub
   workflow_dispatch:
 
+concurrency:
+  group: newera-production-scraper
+  cancel-in-progress: false
+
 jobs:
   scrape-and-sync:
     runs-on: ubuntu-latest
@@ -31,3 +35,13 @@ jobs:
           FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
         run: |
           python scraper.py
+      - name: Check persisted market health
+        if: always()
+        env:
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+        run: python monitor_health.py --write --fail-on-error --report health-report.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: production-health
+          path: health-report.json

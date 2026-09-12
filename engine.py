@@ -873,6 +873,7 @@ def audit_and_tune(results_4d: List[str], saved_prediction: Dict = None) -> Dict
             "ai4": next_ranked[4][:4],
             "ai5": next_ranked[5][:5],
             "ai6": next_ranked[6][:6],
+            "tier_ranked_digits": {str(k): v for k, v in next_ranked.items()},
             "tier_method_weights": {str(k): v for k, v in final_ai_weights.items()},
             "bbfs6": next_bbfs[6],
             "bbfs7": next_bbfs[7],
