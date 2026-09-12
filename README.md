@@ -84,3 +84,55 @@ Menjalankan regression tests:
 python -m py_compile engine.py scraper.py
 python -m unittest discover -s tests -v
 ```
+
+## Engine parity dan health
+
+Python tetap sumber prediksi production. `engine.py` hanya menambahkan metadata
+`tier_ranked_digits`; formula dan aturan bobot tidak berubah. Fixtures deterministik
+ada di `tests/fixtures/parity_histories.json`; ekspor untuk engine TypeScript:
+
+```sh
+python scripts/export_parity.py --output ../parity-python.json
+pip install -r requirements-dev.txt
+ruff check --select E9,F63,F7,F82 .
+python -m compileall -q engine.py scraper.py production_evaluator.py production_health.py state_contract.py monitor_health.py scripts tests
+python -m unittest discover -s tests -v
+```
+
+Frontend menjalankan `npm run parity -- --backend ../newera`. Audit 6 history / 22
+snapshot (44 perbandingan shared-state dan independent lifecycle) menemukan divergence
+pada BBFS, faktor BBFS, Paito, dan label calibration twin. AI rankings/tier, bobot AI,
+dan dead digits cocok pada fixture ini. Hasil bukan klaim parity universal atau edge.
+Laporan lengkap dan baseline review tersedia di repo `newera-web`,
+`docs/engine-parity-health.md`. CI mengunci snapshot Python; perubahan formula harus
+terlihat dalam review. Jangan memperbarui baseline hanya untuk meloloskan tes.
+
+Setiap sync menyimpan `production_health` dengan HEALTHY / STALE / DRIFT / ERROR.
+Pemeriksaan mencakup exact engine/evaluator version, basis count/last draw, prediction
+state, evaluator projection, dan integritas counter prospective. Precedence:
+ERROR > DRIFT > STALE > HEALTHY. Batas freshness scraper 26 jam; ini tidak membuktikan
+source upstream sudah menerbitkan draw terbarunya. Frontend juga membandingkan output
+TypeScript dengan Python pada history dan bobot tersimpan yang sama.
+
+```sh
+# Read-only REST audit; tidak memerlukan service account
+python monitor_health.py --report health-report.json
+# Khusus workflow/operasi dengan Firebase credential: tulis field health saja
+python monitor_health.py --write --fail-on-error --report health-report.json
+```
+
+Workflow scraper menjalankan monitoring setelah sync dan mengunggah artifact health.
+Concurrent scraper runs diserialkan. Scrape/sync error disimpan sebagai ERROR bila
+Firestore dapat diakses; stale-check di web tetap bekerja jika proses tidak berjalan.
+
+Evaluator legacy dengan **nol** live draw boleh dimigrasi ke bucket live-only kosong
+tanpa mengubah metrik replay. Live positif tanpa bucket adalah ERROR. Batch draw
+terlewat tidak dipalsukan sebagai prospective: counter sebelumnya dipertahankan dan
+`unscored_draws` bertambah. History correction mempertahankan evaluator dan memasang
+`evaluation_blocked_reason`; web menahan evidence tersebut sampai recovery diaudit.
+State rusak/versi tak cocok tidak otomatis ditimpa replay baru. Simpan state asli dan
+tentukan validitas observasi sebelum recovery; jangan sekadar menghapus quarantine.
+
+Urutan rollout yang disarankan: backend, lalu frontend. State v2 lama tetap kompatibel;
+migrasi bucket nol-live berjalan pada sync berikutnya. Minimum prospective 30 draw
+dan aturan evidence Wilson 95% CI tetap berlaku.
